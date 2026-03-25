@@ -8,7 +8,7 @@
 
 - Python 3.10+
 - 多个 Telegram 账号（每个角色一个）
-- Anthropic API Key
+- 一个兼容 OpenAI Chat Completions 的模型服务
 
 ---
 
@@ -46,11 +46,9 @@ pip install -r requirements.txt
 
 ---
 
-### 3. 获取 Anthropic API Key
+### 3. 获取 AI API Key
 
-1. 打开 https://console.anthropic.com
-2. 登录后进入 **API Keys** 页面
-3. 点击 **Create Key**，复制生成的 key
+你可以选任意一个当前 `.env.example` 里支持的提供商，比如 Gemini、Groq、Claude 或 OpenAI。
 
 ---
 
@@ -66,10 +64,25 @@ cp .env.example .env
 TELEGRAM_API_ID=你的api_id
 TELEGRAM_API_HASH=你的api_hash
 TELEGRAM_GROUP_ID=-1001234567890
-ANTHROPIC_API_KEY=sk-ant-xxxxx
+AI_API_KEY=你的key
+AI_BASE_URL=对应服务的 OpenAI 兼容地址
+AI_MODEL=对应模型名
 REPLY_DELAY_MIN=15
 REPLY_DELAY_MAX=60
+MIN_SECONDS_BETWEEN_REPLIES=45
+MENTION_REPLY_BONUS=0.25
+MAX_CONTEXT=12
+MAX_HISTORY=80
 ```
+
+如果你本地使用 Clash X 之类的代理，也可以额外配置：
+
+```
+PROXY_HOST=127.0.0.1
+PROXY_PORT=50656
+```
+
+如果不填这两个值，程序会默认直连 Telegram。
 
 ---
 
@@ -103,6 +116,37 @@ python main.py
 ```
 
 登录后会在 `sessions/` 目录保存会话文件，之后运行无需重复登录。
+
+---
+
+## 行为策略
+
+当前项目已经接入了 4 层行为策略，核心配置在 `characters.py` 和 `.env`：
+
+- `GLOBAL_RULES`：全局语气、边界和输出约束
+- `CHARACTERS[*].system`：角色人设
+- `BEHAVIOR_POLICY`：上下文长度、历史长度、连续 AI 轮次、冷却时间等运行策略
+- `.env` 调参项：`MIN_SECONDS_BETWEEN_REPLIES`、`MIN_SECONDS_BETWEEN_REPLIES_HUMAN`、`MIN_SECONDS_BETWEEN_REPLIES_CHARACTER`、`MENTION_REPLY_BONUS`、`MAX_CONTEXT`、`MAX_HISTORY`
+- 场景调参项：`QUIET_WINDOW_SECONDS`、`RECENT_REPLY_WINDOW_SECONDS`、`STALE_PENDING_REPLY_SECONDS`、`SAME_SENDER_STREAK_LIMIT`
+
+现在回复链路会自动处理这些问题：
+
+- 合并全局规则和角色规则生成 prompt
+- 限制连续 AI 接龙，避免机器人自己聊嗨
+- 控制单个角色回复冷却，减少刷屏感
+- 区分普通消息、`@提及`、其他机器人消息，按角色单独设置回复概率
+- 群冷场更容易接话，刚有人接过则自动抑制跟风回复
+- 延迟等待期间如果群里已经有人接上，原计划回复会自动取消
+- 去重最近消息，避免同一条内容被多账号重复记入历史
+- 发起新话题时沿用同一套行为约束，而不是单独裸调模型
+- 把策略命中结果写入 `strategy.log`，方便复盘为什么这次回了或没回
+
+推荐你后面主要调这几类参数：
+
+1. 在 `CHARACTERS[*].reply_probs` 里控制不同消息类型下的活跃度
+2. 在 `CHARACTERS[*].scene_reply_bonus` 里控制冷场接话、跟风抑制、连续单人发言时的介入力度
+3. 在 `CHARACTERS[*].extra_rules`、`relationship_style`、`taboo_topics` 里细化角色边界
+4. 观察 `strategy.log` 里的 `reply_skip`、`reply_cancelled`、`reply_sent`、`topic_sent` 事件，再决定是否继续调冷却和场景阈值
 
 ---
 
