@@ -5,9 +5,10 @@ import os
 import random
 import time
 import socks
+from dotenv import load_dotenv
+load_dotenv()
 from telethon import TelegramClient, events
 from telethon.errors import FloodWaitError
-from dotenv import load_dotenv
 from characters import BEHAVIOR_POLICY, CHARACTERS, GLOBAL_RULES
 from behavior import (
     build_system_prompt,
@@ -20,8 +21,6 @@ from behavior import (
     should_reply,
 )
 from openai import AsyncOpenAI
-
-load_dotenv()
 
 logging.getLogger("telethon").setLevel(logging.ERROR)
 
@@ -106,6 +105,7 @@ policy = merge_policy(
     },
 )
 policy["other_names"] = [character["name"] for character in CHARACTERS]
+policy["always_reply"] = os.getenv("ALWAYS_REPLY", "true").lower() == "true"
 
 strategy_logger = logging.getLogger("strategy")
 strategy_logger.setLevel(logging.INFO)
@@ -356,6 +356,17 @@ def make_handler(client: TelegramClient, character: dict, me_id: int):
                     source="character",
                 )
                 print(f"[{character['name']}] {reply}")
+
+                # 20% 概率连发第二条短句
+                if random.random() < 0.2:
+                    await asyncio.sleep(random.randint(2, 5))
+                    second = await ai_reply(character, chat_history)
+                    second = sanitize_model_text(second)
+                    if second and second != reply:
+                        await client.send_message(GROUP_ID, second)
+                        last_reply_at[character["name"]] = time.time()
+                        record_message(chat_history, policy, name=character["name"], text=second, source="character")
+                        print(f"[{character['name']}] {second}")
                 log_strategy(
                     "reply_sent",
                     character=character["name"],
@@ -387,8 +398,11 @@ async def login_character(character: dict) -> TelegramClient:
     proxy = None
     proxy_host = os.getenv("PROXY_HOST")
     proxy_port = os.getenv("PROXY_PORT")
-    if proxy_host and proxy_port:
-        proxy = (socks.SOCKS5, proxy_host, int(proxy_port))
+    try:
+        if proxy_host and proxy_port:
+            proxy = (socks.SOCKS5, proxy_host, int(proxy_port))
+    except ValueError:
+        print(f"警告：PROXY_PORT 值无效（{proxy_port}），已跳过代理配置")
     client = TelegramClient(character["session_file"], API_ID, API_HASH, proxy=proxy)
     await client.start(phone=character["phone"])
     me = await client.get_me()
@@ -398,19 +412,39 @@ async def login_character(character: dict) -> TelegramClient:
     return client
 
 
-TOPICS = [
-    "刚刷到一个离谱视频，给我看笑了",
-    "今天突然有点不想上班，草",
-    "最近晚上老睡不踏实，不知道是不是咖啡喝多了",
-    "刚点的外卖居然还行，难得",
-    "我发现有些app更新完更难用了",
-    "最近天气一变，人就容易烦",
-    "刚路过便利店，差点又买一堆没用的东西",
-    "有时候真想把手机扔远一点，太吵了",
-]
 
 TOPIC_START_DELAY = int(os.getenv("TOPIC_START_DELAY", 30))
 TOPIC_RETRY_DELAY_ON_EMPTY = int(os.getenv("TOPIC_RETRY_DELAY_ON_EMPTY", 15))
+
+_ALL_TOPIC_DIRECTIONS = [
+    "工作、加班、老板、同事",
+    "吃饭、外卖、今天吃什么",
+    "钱、消费、买了什么",
+    "手机、App、刷到的内容",
+    "睡眠、作息、熬夜",
+    "交通、堵车、出行",
+    "游戏、娱乐、追剧",
+    "朋友、聚会、社交",
+    "天气、季节、身体状态",
+    "随便一件今天发生的小事",
+]
+
+_custom = [d for d in os.getenv("TOPIC_DIRECTIONS_CUSTOM", "").split("||") if d.strip()]
+_all_directions = _ALL_TOPIC_DIRECTIONS + _custom
+_enabled = os.getenv("TOPIC_DIRECTIONS_ENABLED", "")
+_TOPIC_DIRECTIONS = (
+    [d for d in _all_directions if d in _enabled.split("||")]
+    if _enabled else _all_directions
+)
+_topic_index = 0
+
+
+def _pick_topic_direction() -> str:
+    global _topic_index
+    directions = _TOPIC_DIRECTIONS if _TOPIC_DIRECTIONS else _ALL_TOPIC_DIRECTIONS
+    direction = directions[_topic_index % len(directions)]
+    _topic_index += 1
+    return direction
 
 
 async def auto_topic(clients: list[TelegramClient]):
@@ -420,18 +454,20 @@ async def auto_topic(clients: list[TelegramClient]):
     while True:
         character = random.choice(CHARACTERS)
         client = clients[CHARACTERS.index(character)]
-        topic = random.choice(TOPICS)
 
         msg = await generate_with_retry(
             character=character,
             history=chat_history,
             mode="topic",
-            user_content=topic,
+            user_content=(
+                f"从以下话题方向中随机选一个（今天选：{_pick_topic_direction()}），"
+                "用你的风格自然说出来，像随口一句，不要像提问模板。"
+            ),
             max_tokens=120,
         )
         msg = sanitize_model_text(msg)
         if not msg:
-            log_strategy("topic_skipped", character=character["name"], topic_seed=topic)
+            log_strategy("topic_skipped", character=character["name"], topic_seed="ai_generated")
             print(
                 f"[{character['name']}] 发题为空，"
                 f"{TOPIC_RETRY_DELAY_ON_EMPTY}s 后重试"
@@ -451,7 +487,7 @@ async def auto_topic(clients: list[TelegramClient]):
         log_strategy(
             "topic_sent",
             character=character["name"],
-            topic_seed=topic,
+            topic_seed="ai_generated",
             text=msg,
         )
         await asyncio.sleep(interval)

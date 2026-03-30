@@ -70,9 +70,11 @@ def build_system_prompt(
     taboo_block = (
         f"尽量回避这些话题或角度：{'、'.join(taboo_topics)}\n" if taboo_topics else ""
     )
+    _override = character.get("system_override")
+    system_desc = _override if _override is not None and _override.strip() else character.get("system", "")
     return (
-        f"你是群聊成员“{character['name']}”。\n"
-        f"角色设定：{character['system']}\n\n"
+        f'你是群聊成员"{character["name"]}"。\n'
+        f"角色设定：{system_desc}\n\n"
         f"全局行为规则：{global_rules}\n"
         f"{extra_rule_block}"
         f"{relationship_block}"
@@ -152,7 +154,7 @@ def should_reply(
         return False, "no-history"
 
     scene = message_meta.get("scene", {})
-    # 只在“人类消息刚被别的角色接过”时抑制跟风回复，
+    # 只在"人类消息刚被别的角色接过"时抑制跟风回复，
     # 避免所有角色都扑向同一条人类消息；角色之间的多轮对话仍然允许继续发展。
     if (
         message_meta.get("source") == "human"
@@ -165,9 +167,10 @@ def should_reply(
         if not message_meta.get("is_direct_mention"):
             return False, "same-speaker-streak"
 
-    reply_probability = resolve_reply_probability(character, policy, message_meta)
-    if random.random() > reply_probability:
-        return False, "probability-skip"
+    if not policy.get("always_reply", False):
+        reply_probability = resolve_reply_probability(character, policy, message_meta)
+        if random.random() > reply_probability:
+            return False, "probability-skip"
 
     last_message = history[-1]
     if last_message["name"] == character["name"]:
@@ -187,12 +190,9 @@ def should_reply(
     if now < cooldown_until:
         return False, "cooldown"
 
-    # 暂时关闭连续 AI 轮次限制。
-    # 当前项目主要是双角色自聊，这条规则会把对话硬掐断；
-    # 之后如果要混入真人群，再考虑按场景恢复成可配置开关。
-    # consecutive_ai_turns = count_recent_ai_turns(history)
-    # if consecutive_ai_turns >= policy["max_consecutive_ai_turns"]:
-    #     return False, "too-many-ai-turns"
+    consecutive_ai_turns = count_recent_ai_turns(history)
+    if consecutive_ai_turns >= policy["max_consecutive_ai_turns"]:
+        return False, "too-many-ai-turns"
 
     if is_duplicate_risk(character["name"], history, policy["duplicate_window"]):
         return False, "duplicate-risk"
