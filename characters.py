@@ -1,5 +1,6 @@
 # 角色配置
 # session 字段留空，首次运行后会自动填入
+import os
 
 BEHAVIOR_POLICY = {
     "max_context": 12,
@@ -31,7 +32,7 @@ CHARACTERS = [
             "整体风格轻浮但不低俗，点到为止，制造一点性张力但不过界。"
         ),
         "session_file": "sessions/xiaoming.session",
-        "phone": "+8617770029225",
+        "phone": os.getenv("CHARACTER_XIAOMING_PHONE", ""),
         "reply_prob": 0.72,
         "reply_probs": {
             "human": 0.62,
@@ -59,7 +60,7 @@ CHARACTERS = [
             "整体风格克制、含蓄，但偶尔一句话很有杀伤力。"
         ),
         "session_file": "sessions/laowang.session",
-        "phone": "+8619954224463",
+        "phone": os.getenv("CHARACTER_LAOWANG_PHONE", ""),
         "reply_prob": 0.58,
         "reply_probs": {
             "human": 0.5,

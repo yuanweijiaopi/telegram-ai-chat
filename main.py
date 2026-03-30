@@ -19,11 +19,15 @@ from behavior import (
     should_send_after_delay,
     should_reply,
 )
-from openai import OpenAI
+from openai import AsyncOpenAI
 
 load_dotenv()
 
 logging.getLogger("telethon").setLevel(logging.ERROR)
+
+_missing = [v for v in ("TELEGRAM_API_ID", "TELEGRAM_API_HASH", "TELEGRAM_GROUP_ID", "AI_API_KEY", "AI_MODEL") if not os.getenv(v)]
+if _missing:
+    raise EnvironmentError(f"缺少必需的环境变量：{', '.join(_missing)}，请检查 .env 文件")
 
 API_ID = int(os.getenv("TELEGRAM_API_ID"))
 API_HASH = os.getenv("TELEGRAM_API_HASH")
@@ -33,7 +37,7 @@ REPLY_DELAY_MIN = int(os.getenv("REPLY_DELAY_MIN", 15))
 REPLY_DELAY_MAX = int(os.getenv("REPLY_DELAY_MAX", 60))
 
 # 通用 AI 客户端，切换模型只需修改 .env
-ai = OpenAI(
+ai = AsyncOpenAI(
     api_key=os.getenv("AI_API_KEY"),
     base_url=os.getenv("AI_BASE_URL"),
 )
@@ -139,7 +143,7 @@ def format_recent_history(history: list[dict], limit: int = 4) -> str:
     return "\n".join(lines) or "暂无"
 
 
-def generate_with_retry(
+async def generate_with_retry(
     *,
     character: dict,
     history: list[dict],
@@ -155,7 +159,7 @@ def generate_with_retry(
         policy,
         mode=mode,
     )
-    response = ai.chat.completions.create(
+    response = await ai.chat.completions.create(
         model=AI_MODEL,
         max_tokens=max_tokens,
         messages=[
@@ -191,7 +195,7 @@ def generate_with_retry(
         ),
     }
     recent_history_text = format_recent_history(history, limit=4)
-    retry_response = ai.chat.completions.create(
+    retry_response = await ai.chat.completions.create(
         model=AI_MODEL,
         max_tokens=max(80, max_tokens),
         messages=[
@@ -230,7 +234,7 @@ def generate_with_retry(
 
 async def ai_reply(character: dict, history: list[dict]) -> str:
     """调用 AI 生成角色回复"""
-    return generate_with_retry(
+    return await generate_with_retry(
         character=character,
         history=history,
         mode="reply",
@@ -239,7 +243,7 @@ async def ai_reply(character: dict, history: list[dict]) -> str:
     )
 
 
-def make_handler(client: TelegramClient, character: dict):
+def make_handler(client: TelegramClient, character: dict, me_id: int):
     """为每个角色生成消息处理器"""
 
     @client.on(events.NewMessage(chats=GROUP_ID))
@@ -249,8 +253,7 @@ def make_handler(client: TelegramClient, character: dict):
             return
 
         # 忽略自己发的消息
-        me = await client.get_me()
-        if event.sender_id == me.id:
+        if event.sender_id == me_id:
             print(f"[{character['name']}] 忽略自己的消息")
             return
 
@@ -391,7 +394,7 @@ async def login_character(character: dict) -> TelegramClient:
     me = await client.get_me()
     managed_sender_ids[me.id] = character["name"]
     print(f"✓ {character['name']} 登录成功 ({me.first_name})")
-    make_handler(client, character)
+    make_handler(client, character, me.id)
     return client
 
 
@@ -419,7 +422,7 @@ async def auto_topic(clients: list[TelegramClient]):
         client = clients[CHARACTERS.index(character)]
         topic = random.choice(TOPICS)
 
-        msg = generate_with_retry(
+        msg = await generate_with_retry(
             character=character,
             history=chat_history,
             mode="topic",
