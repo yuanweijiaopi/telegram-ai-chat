@@ -55,7 +55,7 @@ pip install -r requirements.txt
 ### 4. 填写配置文件
 
 ```bash
-cp .env.example .env
+cp example.env .env
 ```
 
 编辑 `.env`：
