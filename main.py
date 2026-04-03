@@ -4,6 +4,7 @@ import logging
 import os
 import random
 import time
+import httpx
 import socks
 from dotenv import load_dotenv
 load_dotenv()
@@ -39,6 +40,9 @@ REPLY_DELAY_MAX = int(os.getenv("REPLY_DELAY_MAX", 60))
 ai = AsyncOpenAI(
     api_key=os.getenv("AI_API_KEY"),
     base_url=os.getenv("AI_BASE_URL"),
+    # openai==1.0.0 默认会给 httpx.AsyncClient 传入已废弃的 proxies 参数；
+    # 显式提供客户端，兼容当前环境中的 httpx 0.28+。
+    http_client=httpx.AsyncClient(),
 )
 AI_MODEL = os.getenv("AI_MODEL")
 
@@ -129,6 +133,38 @@ def sanitize_model_text(text: str | None) -> str:
         return ""
     cleaned = text.strip().strip("\"' \n\t")
     return cleaned
+
+
+def format_login_identity(character: dict) -> str:
+    phone = (character.get("phone") or "").strip()
+    suffix = phone[-4:] if len(phone) >= 4 else phone or "未知号码"
+    return f"{character['name']}({suffix})"
+
+
+def format_telegram_identity(me, character: dict) -> str:
+    display_name = getattr(me, "first_name", None) or getattr(me, "username", None)
+    if display_name:
+        return display_name
+    return format_login_identity(character)
+
+
+async def resolve_login_identity(client: TelegramClient, character: dict) -> str:
+    await client.connect()
+    existing_me = await client.get_me()
+    if existing_me is not None:
+        return format_telegram_identity(existing_me, character)
+    return format_login_identity(character)
+
+
+def build_proxy():
+    proxy_host = os.getenv("PROXY_HOST")
+    proxy_port = os.getenv("PROXY_PORT")
+    try:
+        if proxy_host and proxy_port:
+            return (socks.SOCKS5, proxy_host, int(proxy_port))
+    except ValueError:
+        print(f"警告：PROXY_PORT 值无效（{proxy_port}），已跳过代理配置")
+    return None
 
 
 def format_recent_history(history: list[dict], limit: int = 4) -> str:
@@ -395,16 +431,21 @@ def make_handler(client: TelegramClient, character: dict, me_id: int):
 async def login_character(character: dict) -> TelegramClient:
     """登录单个角色账号"""
     os.makedirs("sessions", exist_ok=True)
-    proxy = None
-    proxy_host = os.getenv("PROXY_HOST")
-    proxy_port = os.getenv("PROXY_PORT")
-    try:
-        if proxy_host and proxy_port:
-            proxy = (socks.SOCKS5, proxy_host, int(proxy_port))
-    except ValueError:
-        print(f"警告：PROXY_PORT 值无效（{proxy_port}），已跳过代理配置")
+    proxy = build_proxy()
     client = TelegramClient(character["session_file"], API_ID, API_HASH, proxy=proxy)
-    await client.start(phone=character["phone"])
+    login_identity = await resolve_login_identity(client, character)
+
+    def ask_code() -> str:
+        return input(f"[{login_identity}] 请输入收到的验证码: ").strip()
+
+    def ask_password() -> str:
+        return input(f"[{login_identity}] 请输入二步验证密码: ").strip()
+
+    await client.start(
+        phone=character["phone"],
+        code_callback=ask_code,
+        password=ask_password,
+    )
     me = await client.get_me()
     managed_sender_ids[me.id] = character["name"]
     print(f"✓ {character['name']} 登录成功 ({me.first_name})")
@@ -495,7 +536,19 @@ async def auto_topic(clients: list[TelegramClient]):
 
 async def main():
     print("正在登录所有角色...")
-    clients = await asyncio.gather(*[login_character(c) for c in CHARACTERS])
+    clients = []
+    proxy = build_proxy()
+    for character in CHARACTERS:
+        preview_client = TelegramClient(character["session_file"], API_ID, API_HASH, proxy=proxy)
+        try:
+            login_identity = await resolve_login_identity(preview_client, character)
+        finally:
+            await preview_client.disconnect()
+
+        print(f"开始登录 {login_identity}")
+        client = await login_character(character)
+        me = await client.get_me()
+        clients.append(client)
 
     print(f"\n所有角色已就绪，监听群 {GROUP_ID} 中...\n")
     await asyncio.gather(

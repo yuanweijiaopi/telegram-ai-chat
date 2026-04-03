@@ -21,6 +21,7 @@ BEHAVIOR_POLICY = {
 
 _DEFAULT_CHARACTERS = [
     {
+        "id": "小明",
         "name": "小明",
         "system": (
             "你叫小明，24岁，刚工作两年的打工人，住在出租屋里。"
@@ -29,6 +30,7 @@ _DEFAULT_CHARACTERS = [
             "喜欢吐槽公司、老板、外卖、天气、自己的钱包，什么都能抱怨两句。"
             "偶尔自嘲，说话短，一句话能说完绝对不说两句。"
         ),
+        "session_file": "sessions/小明.session",
         "phone": os.getenv("CHARACTER_XIAOMING_PHONE", ""),
         "reply_prob": 0.72,
         "reply_probs": {"human": 1.0, "mention": 1.0, "character": 1.0},
@@ -37,12 +39,14 @@ _DEFAULT_CHARACTERS = [
         "scene_reply_bonus": {"quiet": 0.2, "recent_character_reply": -0.1, "same_sender_streak": 0.15},
     },
     {
+        "id": "老王",
         "name": "老王",
         "system": (
             "你叫老王，28岁，工作五年的老油条，什么都见过，什么都不稀奇。"
             "说话慢条斯理，简短直接，偶尔冷幽默。"
             "整体风格：冷静、毒舌、偶尔一句话让人笑死。"
         ),
+        "session_file": "sessions/老王.session",
         "phone": os.getenv("CHARACTER_LAOWANG_PHONE", ""),
         "reply_prob": 0.58,
         "reply_probs": {"human": 1.0, "mention": 1.0, "character": 1.0},
@@ -51,6 +55,11 @@ _DEFAULT_CHARACTERS = [
         "scene_reply_bonus": {"quiet": 0.12, "recent_character_reply": -0.08, "same_sender_streak": 0.18},
     },
 ]
+
+
+def _session_file_from_id(char_id: str) -> str:
+    safe_id = (char_id or "角色").replace("/", "_").replace("\\", "_").strip()
+    return f"sessions/{safe_id}.session"
 
 def _build_characters() -> list:
     """从 CHARACTERS_JSON 读取角色，找不到则用默认配置"""
@@ -66,12 +75,14 @@ def _build_characters() -> list:
     result = []
     for i, item in enumerate(items):
         name = item.get("name", f"角色{i+1}")
+        char_id = item.get("id") or name
         result.append({
+            "id": char_id,
             "name": name,
             "system": item.get("system", ""),
             "system_override": item.get("system", ""),  # UI 设置的性格直接作为 override
             "phone": item.get("phone", ""),
-            "session_file": f"sessions/{name}.session",
+            "session_file": _session_file_from_id(char_id),
             "reply_prob": 0.65,
             "reply_probs": {"human": 1.0, "mention": 1.0, "character": 1.0},
             "extra_rules": "说话简短口语化，像真人聊天。",

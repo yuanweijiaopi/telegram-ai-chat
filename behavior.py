@@ -153,21 +153,24 @@ def should_reply(
     if not history:
         return False, "no-history"
 
+    force_reply = policy.get("always_reply", False)
     scene = message_meta.get("scene", {})
     # 只在"人类消息刚被别的角色接过"时抑制跟风回复，
     # 避免所有角色都扑向同一条人类消息；角色之间的多轮对话仍然允许继续发展。
     if (
+        not force_reply
+        and
         message_meta.get("source") == "human"
         and scene.get("recent_other_character_reply")
         and not message_meta.get("is_direct_mention")
     ):
         return False, "recently-answered"
 
-    if scene.get("same_sender_streak", 0) >= policy["same_sender_streak_limit"]:
+    if not force_reply and scene.get("same_sender_streak", 0) >= policy["same_sender_streak_limit"]:
         if not message_meta.get("is_direct_mention"):
             return False, "same-speaker-streak"
 
-    if not policy.get("always_reply", False):
+    if not force_reply:
         reply_probability = resolve_reply_probability(character, policy, message_meta)
         if random.random() > reply_probability:
             return False, "probability-skip"
@@ -191,10 +194,10 @@ def should_reply(
         return False, "cooldown"
 
     consecutive_ai_turns = count_recent_ai_turns(history)
-    if consecutive_ai_turns >= policy["max_consecutive_ai_turns"]:
+    if not force_reply and consecutive_ai_turns >= policy["max_consecutive_ai_turns"]:
         return False, "too-many-ai-turns"
 
-    if is_duplicate_risk(character["name"], history, policy["duplicate_window"]):
+    if not force_reply and is_duplicate_risk(character["name"], history, policy["duplicate_window"]):
         return False, "duplicate-risk"
 
     return True, "ok"
