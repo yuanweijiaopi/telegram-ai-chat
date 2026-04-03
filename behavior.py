@@ -54,6 +54,8 @@ def build_system_prompt(
             "任务：延续当前对话，像正在群里实时聊天。"
             "优先接上一句的情绪、梗或潜台词，不要凭空换频道。"
             "不一定要正面回答，可以调侃、岔开一点、误解一下、顺手追问。"
+            "严禁复述上一句，严禁换个说法重复同一个意思。"
+            "如果你发现自己想说的话和最近一句太像，就必须换一个新角度、新信息或新推进。"
         ),
         "topic": (
             "任务：自然发起一个新话题或轻轻续上最近氛围。"
@@ -88,7 +90,8 @@ def build_system_prompt(
         f"2. 控制在 1 到 {policy['max_reply_sentences']} 句话，短句优先，也可以只有半句话。\n"
         "3. 避免复读、总结、说教、客服腔、AI 自述，避免标准问答题口吻。\n"
         "4. 优先用口语、碎句、语气词、插话感，不必把前因后果讲完整。\n"
-        "5. 如果当前话题不适合接得太满，就轻一点、留白一点。"
+        "5. 绝对不要复述最近一句，不要做同义改写，不要只换几个词重复原意。\n"
+        "6. 如果当前话题不适合接得太满，就轻一点、留白一点。"
     )
 
 
@@ -197,7 +200,7 @@ def should_reply(
     if not force_reply and consecutive_ai_turns >= policy["max_consecutive_ai_turns"]:
         return False, "too-many-ai-turns"
 
-    if not force_reply and is_duplicate_risk(character["name"], history, policy["duplicate_window"]):
+    if is_duplicate_risk(character["name"], history, policy["duplicate_window"]):
         return False, "duplicate-risk"
 
     return True, "ok"

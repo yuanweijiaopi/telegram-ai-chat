@@ -57,6 +57,10 @@ _DEFAULT_CHARACTERS = [
 ]
 
 
+def _preferred_character_id(name: str, index: int) -> str:
+    return (name or f"角色{index+1}").strip() or f"角色{index+1}"
+
+
 def _session_file_from_id(char_id: str) -> str:
     safe_id = (char_id or "角色").replace("/", "_").replace("\\", "_").strip()
     return f"sessions/{safe_id}.session"
@@ -75,7 +79,7 @@ def _build_characters() -> list:
     result = []
     for i, item in enumerate(items):
         name = item.get("name", f"角色{i+1}")
-        char_id = item.get("id") or name
+        char_id = item.get("id") or _preferred_character_id(name, i)
         result.append({
             "id": char_id,
             "name": name,

@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import random
+import re
 import time
 import httpx
 import socks
@@ -13,14 +14,16 @@ from telethon.errors import FloodWaitError
 from characters import BEHAVIOR_POLICY, CHARACTERS, GLOBAL_RULES
 from behavior import (
     build_system_prompt,
-    detect_message_meta,
-    enrich_message_meta,
     is_recent_duplicate_entry,
     merge_policy,
     record_message,
-    should_send_after_delay,
-    should_reply,
 )
+from session_manager import (
+    cleanup_orphaned_sessions,
+    validate_no_duplicate_phones,
+    validate_session_identity,
+)
+from difflib import SequenceMatcher
 from openai import AsyncOpenAI
 
 logging.getLogger("telethon").setLevel(logging.ERROR)
@@ -47,9 +50,9 @@ ai = AsyncOpenAI(
 AI_MODEL = os.getenv("AI_MODEL")
 
 chat_history = []  # 所有角色共享的聊天记录
-reply_lock = asyncio.Lock()  # 防止多个角色同时抢着回复
 last_reply_at = {}
 managed_sender_ids = {}
+_reply_queue: asyncio.Queue = asyncio.Queue(maxsize=50)  # AI Town 协调器队列，限制深度防止堆积
 policy = merge_policy(
     BEHAVIOR_POLICY,
     {
@@ -128,10 +131,36 @@ def log_strategy(event_type: str, **payload):
     strategy_logger.info(json.dumps(entry, ensure_ascii=False))
 
 
+def _is_too_similar_to_recent(reply: str, history: list, threshold: float = 0.6, window: int = 5) -> bool:
+    for item in history[-window:]:
+        ratio = SequenceMatcher(None, reply, item.get("text", "")).ratio()
+        if ratio > threshold:
+            return True
+    return False
+
+
 def sanitize_model_text(text: str | None) -> str:
     if not text:
         return ""
     cleaned = text.strip().strip("\"' \n\t")
+    return cleaned
+
+
+def strip_character_prefix(text: str, character: dict) -> str:
+    cleaned = sanitize_model_text(text)
+    if not cleaned:
+        return ""
+
+    names = [character.get("name", "").strip()]
+    telegram_name = (character.get("telegram_name") or "").strip()
+    if telegram_name:
+        names.append(telegram_name)
+
+    for name in names:
+        if not name:
+            continue
+        pattern = rf"^\s*{re.escape(name)}\s*[：:,-]\s*"
+        cleaned = re.sub(pattern, "", cleaned, count=1).strip()
     return cleaned
 
 
@@ -279,153 +308,141 @@ async def ai_reply(character: dict, history: list[dict]) -> str:
     )
 
 
+async def ai_reply_with_new_angle(character: dict, history: list[dict]) -> str:
+    """在重复风险较高时，强制换一个角度重新生成回复"""
+    return await generate_with_retry(
+        character=character,
+        history=history,
+        mode="reply",
+        user_content=(
+            "请继续这个对话，但必须换一个新角度。"
+            "不要复述上一句，不要同义改写，不要只换几个词。"
+            "可以补充新信息、换个吐槽点、推进一下话题，像真人接话。"
+        ),
+        max_tokens=120,
+    )
+
+
+async def ai_reply_unique(character: dict, history: list[dict]) -> str:
+    """借鉴 AI Town 的唯一性保证：最多重试3次，确保内容不与近期消息重复"""
+    reply = await ai_reply(character, history)
+    reply = strip_character_prefix(reply, character)
+
+    for attempt in range(3):
+        # 有内容且不重复，直接用
+        if reply and not _is_too_similar_to_recent(reply, history):
+            break
+        # 空内容或太相似，都继续重试
+        print(f"[{character['name']}] 内容{'为空' if not reply else '重复'}，换角度重试（第{attempt + 1}次）")
+        log_strategy("reply_similar_retry", character=character["name"], attempt=attempt + 1)
+        reply = await ai_reply_with_new_angle(character, history)
+        reply = strip_character_prefix(reply, character)
+
+    return reply
+
+
 def make_handler(client: TelegramClient, character: dict, me_id: int):
-    """为每个角色生成消息处理器"""
+    """每个角色只负责收消息入队，回复由 reply_coordinator 统一分配（AI Town 模式）"""
 
     @client.on(events.NewMessage(chats=GROUP_ID))
     async def handler(event):
-        print(f"[{character['name']}] 收到消息: {event.text[:30] if event.text else '(非文字)'}")
-        if not event.text:
+        if not event.text or event.sender_id == me_id:
             return
-
-        # 忽略自己发的消息
-        if event.sender_id == me_id:
-            print(f"[{character['name']}] 忽略自己的消息")
-            return
-
-        # 记录到共享历史
         sender = await event.get_sender()
         sender_name = managed_sender_ids.get(event.sender_id, getattr(sender, "first_name", "未知"))
         source = "character" if event.sender_id in managed_sender_ids else "human"
-        message_meta = detect_message_meta(
-            text=event.text,
-            sender_name=sender_name,
-            source=source,
-            character_name=character["name"],
-            aliases=[character["name"], f"@{character['name']}"],
-        )
-        if not is_recent_duplicate_entry(chat_history, name=sender_name, text=event.text):
-            record_message(
-                chat_history,
-                policy,
-                name=sender_name,
-                text=event.text,
-                source=source,
-            )
-            message_meta = enrich_message_meta(chat_history, policy, message_meta)
-        else:
-            message_meta = enrich_message_meta(chat_history, policy, message_meta)
-            log_strategy(
-                "history_skip_duplicate",
-                character=character["name"],
-                sender=sender_name,
-                text=event.text,
-            )
-
-        ok_to_reply, reason = should_reply(
-            character,
-            chat_history,
-            policy,
-            last_reply_at,
-            message_meta,
-        )
-        if not ok_to_reply:
-            print(f"[{character['name']}] 跳过回复: {reason}")
-            log_strategy(
-                "reply_skip",
-                character=character["name"],
-                reason=reason,
-                message_meta=message_meta,
-                history_size=len(chat_history),
-            )
-            return
-
-        # 随机延迟，模拟真人
-        delay = random.randint(REPLY_DELAY_MIN, REPLY_DELAY_MAX)
-        log_strategy(
-            "reply_scheduled",
-            character=character["name"],
-            delay=delay,
-            message_meta=message_meta,
-        )
-        pending_text = event.text
-        pending_sender = sender_name
-        await asyncio.sleep(delay)
-
-        async with reply_lock:
-            try:
-                can_send, final_reason = should_send_after_delay(
-                    character,
-                    chat_history,
-                    policy,
-                    pending_text,
-                    pending_sender,
-                    message_meta,
-                )
-                if not can_send:
-                    log_strategy(
-                        "reply_cancelled",
-                        character=character["name"],
-                        reason=final_reason,
-                        message_meta=message_meta,
-                    )
-                    print(f"[{character['name']}] 取消回复: {final_reason}")
-                    return
-
-                reply = await ai_reply(character, chat_history)
-                reply = sanitize_model_text(reply)
-                if not reply:
-                    log_strategy(
-                        "reply_empty",
-                        character=character["name"],
-                        message_meta=message_meta,
-                    )
-                    print(f"[{character['name']}] 跳过空回复")
-                    return
-                await client.send_message(GROUP_ID, reply)
-                last_reply_at[character["name"]] = time.time()
-                record_message(
-                    chat_history,
-                    policy,
-                    name=character["name"],
-                    text=reply,
-                    source="character",
-                )
-                print(f"[{character['name']}] {reply}")
-
-                # 20% 概率连发第二条短句
-                if random.random() < 0.2:
-                    await asyncio.sleep(random.randint(2, 5))
-                    second = await ai_reply(character, chat_history)
-                    second = sanitize_model_text(second)
-                    if second and second != reply:
-                        await client.send_message(GROUP_ID, second)
-                        last_reply_at[character["name"]] = time.time()
-                        record_message(chat_history, policy, name=character["name"], text=second, source="character")
-                        print(f"[{character['name']}] {second}")
-                log_strategy(
-                    "reply_sent",
-                    character=character["name"],
-                    text=reply,
-                    message_meta=message_meta,
-                )
-            except FloodWaitError as e:
-                print(f"[{character['name']}] 触发限流，等待 {e.seconds}s")
-                log_strategy(
-                    "reply_flood_wait",
-                    character=character["name"],
-                    seconds=e.seconds,
-                )
-                await asyncio.sleep(e.seconds)
-            except Exception as e:
-                print(f"[{character['name']}] 出错：{e}")
-                log_strategy(
-                    "reply_error",
-                    character=character["name"],
-                    error=str(e),
-                )
+        print(f"[{character['name']}] 收到消息: {event.text[:30]}")
+        try:
+            _reply_queue.put_nowait({
+                "text": event.text,
+                "sender_name": sender_name,
+                "source": source,
+                "timestamp": time.time(),
+            })
+        except asyncio.QueueFull:
+            print(f"[{character['name']}] 队列已满，丢弃消息: {event.text[:30]}")
+            log_strategy("queue_full_drop", sender=sender_name, text=event.text[:30])
 
     return handler
+
+
+async def reply_coordinator(clients: list[TelegramClient]):
+    """
+    借鉴 AI Town 单线程协调器：
+    - 所有消息统一入队，每次只处理一条
+    - 随机指定一个角色回复，其他角色不抢
+    - 配合 ai_reply_unique 保证内容不重复
+    """
+    client_map = {character["name"]: clients[i] for i, character in enumerate(CHARACTERS)}
+
+    while True:
+        item = await _reply_queue.get()
+        text = item["text"]
+        sender_name = item["sender_name"]
+        source = item["source"]
+        is_retry = item.get("is_retry", False)
+
+        # 非重试消息才记录历史；重试时历史已记录，直接跳到发送
+        if not is_retry:
+            if not is_recent_duplicate_entry(chat_history, name=sender_name, text=text):
+                record_message(chat_history, policy, name=sender_name, text=text, source=source)
+            else:
+                log_strategy("history_skip_duplicate", sender=sender_name, text=text)
+                continue
+
+        # 重试时复用原角色，否则随机指定一个（排除发送者）
+        if is_retry and "assigned_character" in item:
+            character = next((c for c in CHARACTERS if c["name"] == item["assigned_character"]), None)
+            if not character:
+                continue
+        else:
+            candidates = [c for c in CHARACTERS if c["name"] != sender_name]
+            if not candidates:
+                continue
+            character = random.choice(candidates)
+        client = client_map[character["name"]]
+
+        # 重试不再等待，直接发；首次处理才延迟+过期检查
+        if not is_retry:
+            delay = random.randint(REPLY_DELAY_MIN, REPLY_DELAY_MAX)
+            log_strategy("reply_scheduled", character=character["name"], delay=delay, trigger=text[:30])
+            await asyncio.sleep(delay)
+
+            msg_age = time.time() - item["timestamp"]
+            if msg_age > REPLY_DELAY_MAX * 2:
+                log_strategy("reply_stale_skipped", character=character["name"], age=int(msg_age), text=text[:30])
+                print(f"[{character['name']}] 消息已过期（{int(msg_age)}s），跳过")
+                continue
+
+        try:
+            reply = await ai_reply_unique(character, chat_history)
+            if not reply:
+                log_strategy("reply_empty", character=character["name"])
+                print(f"[{character['name']}] 跳过空回复")
+                continue
+
+            await client.send_message(GROUP_ID, reply)
+            record_message(chat_history, policy, name=character["name"], text=reply, source="character")
+            print(f"[{character['name']}] {reply}")
+            log_strategy("reply_sent", character=character["name"], text=reply)
+
+        except FloodWaitError as e:
+            print(f"[{character['name']}] 触发限流，等待 {e.seconds}s")
+            log_strategy("reply_flood_wait", character=character["name"], seconds=e.seconds)
+            await asyncio.sleep(e.seconds)
+            # 标记为重试并重置时间戳，避免重入队后立即过期
+            try:
+                _reply_queue.put_nowait({
+                    **item,
+                    "is_retry": True,
+                    "assigned_character": character["name"],
+                    "timestamp": time.time(),
+                })
+            except asyncio.QueueFull:
+                log_strategy("reply_flood_requeue_failed", character=character["name"])
+        except Exception as e:
+            print(f"[{character['name']}] 出错：{e}")
+            log_strategy("reply_error", character=character["name"], error=str(e))
 
 
 async def login_character(character: dict) -> TelegramClient:
@@ -433,6 +450,14 @@ async def login_character(character: dict) -> TelegramClient:
     os.makedirs("sessions", exist_ok=True)
     proxy = build_proxy()
     client = TelegramClient(character["session_file"], API_ID, API_HASH, proxy=proxy)
+
+    # 校验 session 文件与角色手机号是否一致
+    await client.connect()
+    ok, reason = await validate_session_identity(client, character)
+    await client.disconnect()
+    if not ok:
+        raise RuntimeError(f"[{character['name']}] Session 与角色不匹配：{reason}")
+
     login_identity = await resolve_login_identity(client, character)
 
     def ask_code() -> str:
@@ -506,7 +531,7 @@ async def auto_topic(clients: list[TelegramClient]):
             ),
             max_tokens=120,
         )
-        msg = sanitize_model_text(msg)
+        msg = strip_character_prefix(msg, character)
         if not msg:
             log_strategy("topic_skipped", character=character["name"], topic_seed="ai_generated")
             print(
@@ -535,6 +560,16 @@ async def auto_topic(clients: list[TelegramClient]):
 
 
 async def main():
+    # ── Session 启动检查 ──────────────────────────────────────────
+    validate_no_duplicate_phones(CHARACTERS)
+
+    orphaned = cleanup_orphaned_sessions(CHARACTERS)
+    if orphaned:
+        print(f"已清理 {len(orphaned)} 个孤立 session 文件：")
+        for f in orphaned:
+            print(f"  删除：{f}")
+
+    # ─────────────────────────────────────────────────────────────
     print("正在登录所有角色...")
     clients = []
     proxy = build_proxy()
@@ -554,6 +589,7 @@ async def main():
     await asyncio.gather(
         *[c.run_until_disconnected() for c in clients],
         auto_topic(clients),
+        reply_coordinator(clients),
     )
 
 
