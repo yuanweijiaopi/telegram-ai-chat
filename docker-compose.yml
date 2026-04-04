@@ -1,0 +1,10 @@
+services:
+  telegram-ai-chat:
+    build: .
+    container_name: telegram-ai-chat
+    restart: always
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./sessions:/app/sessions
+      - ./.env:/app/.env

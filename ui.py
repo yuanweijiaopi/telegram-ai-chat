@@ -18,6 +18,7 @@ PID_FILE = ".bot.pid"
 
 st.set_page_config(page_title="Telegram AI 群聊配置", layout="centered")
 st.title("Telegram AI 群聊配置")
+st.caption("按顺序完成 4 步即可启动机器人；每一步都可以随时回来重新修改。")
 
 notice = st.session_state.pop("app_notice", None)
 if notice:
@@ -153,6 +154,63 @@ def normalize_base_url(url: str) -> str:
     return (url or "").rstrip("/")
 
 
+def summarize_basic_config(api_id: str, api_hash: str, ai_key: str, characters: list[dict]) -> str:
+    if not api_id or not api_hash or not ai_key:
+        return "待完善"
+    if not characters:
+        return "待完善"
+    missing_character_fields = [
+        char.get("name", f"角色{i+1}")
+        for i, char in enumerate(characters)
+        if not (char.get("name") or "").strip() or not (char.get("phone") or "").strip()
+    ]
+    if missing_character_fields:
+        return f"待完善（缺少角色信息：{', '.join(missing_character_fields[:2])}）"
+    return f"已完成（{len(characters)} 个角色）"
+
+
+def summarize_login_step(characters: list[dict]) -> str:
+    if not characters:
+        return "待配置角色"
+    confirmed = 0
+    session_only = 0
+    for char in characters:
+        char_id = char.get("id", "")
+        login_meta = st.session_state.get(f"login_meta_{char_id}")
+        if login_meta and login_meta.get("ok"):
+            confirmed += 1
+            continue
+        if os.path.exists(session_file_for_character(char_id)):
+            session_only += 1
+    if confirmed == len(characters):
+        return f"已完成（{confirmed}/{len(characters)} 已确认登录）"
+    if confirmed > 0 or session_only > 0:
+        return f"进行中（已确认 {confirmed}/{len(characters)}，另有 {session_only} 个待检查）"
+    return "未开始"
+
+
+def summarize_group_step(group_id: str) -> str:
+    if (group_id or "").strip():
+        return f"已选择（{group_id.strip()}）"
+    return "未选择"
+
+
+def summarize_runtime_step() -> str:
+    return "运行中" if is_running() else "待启动"
+
+
+REPLY_STRATEGY_OPTIONS = {
+    "random": "当前策略：随机分配",
+    "round_robin": "轮流回复",
+    "least_recent": "优先最近最久没发言",
+}
+
+INTERACTION_MODE_OPTIONS = {
+    "mixed": "正常模式：会理真人，也会角色互聊",
+    "character_only": "只让角色互聊，不理会真人",
+}
+
+
 def build_form_data(
     *,
     api_id: str,
@@ -163,6 +221,8 @@ def build_form_data(
     ai_model: str,
     characters: list[dict],
     always_reply: bool,
+    reply_assignment_strategy: str,
+    interaction_mode: str,
     delay_min: int,
     delay_max: int,
     cooldown_human: int,
@@ -187,6 +247,8 @@ def build_form_data(
         "AI_MODEL": ai_model,
         "CHARACTERS_JSON": _json.dumps(normalized_characters, ensure_ascii=False),
         "ALWAYS_REPLY": "true" if always_reply else "false",
+        "REPLY_ASSIGNMENT_STRATEGY": reply_assignment_strategy,
+        "INTERACTION_MODE": interaction_mode,
         "REPLY_DELAY_MIN": str(delay_min),
         "REPLY_DELAY_MAX": str(delay_max),
         "MIN_SECONDS_BETWEEN_REPLIES_HUMAN": str(cooldown_human),
@@ -215,6 +277,8 @@ def persist_form_state(
     ai_model: str,
     characters: list[dict],
     always_reply: bool,
+    reply_assignment_strategy: str,
+    interaction_mode: str,
     delay_min: int,
     delay_max: int,
     cooldown_human: int,
@@ -236,6 +300,8 @@ def persist_form_state(
         ai_model=ai_model,
         characters=characters,
         always_reply=always_reply,
+        reply_assignment_strategy=reply_assignment_strategy,
+        interaction_mode=interaction_mode,
         delay_min=delay_min,
         delay_max=delay_max,
         cooldown_human=cooldown_human,
@@ -399,8 +465,9 @@ async def fetch_group_choices(api_id: str, api_hash: str, proxy_host: str, proxy
     raise RuntimeError(detail)
 
 
-# ── Telegram 配置 ──────────────────────────────────────
-st.header("1. Telegram 配置")
+# ── 基础配置 ───────────────────────────────────────────
+st.header("1. 基础配置")
+st.caption("先填写 Telegram、AI 和角色信息。这部分是后续登录和启动的前提。")
 col1, col2 = st.columns(2)
 with col1:
     api_id = st.text_input("API ID", value=env.get("TELEGRAM_API_ID", ""))
@@ -411,11 +478,13 @@ if "pending_group_id_input" in st.session_state:
     st.session_state.group_id_input = st.session_state.pop("pending_group_id_input")
 elif "group_id_input" not in st.session_state:
     st.session_state.group_id_input = env.get("TELEGRAM_GROUP_ID", "")
+group_id = st.session_state.group_id_input
 
-group_id = st.text_input("群组 ID（负数，如 -1002278401337）", key="group_id_input")
+st.subheader("Telegram")
+st.caption("登录账号和读取群组都会用到这里的凭据。")
 
 # ── AI 配置 ────────────────────────────────────────────
-st.header("2. AI 配置")
+st.subheader("AI 配置")
 PROVIDER_MAP = {
     "Groq（免费）": ("https://api.groq.com/openai/v1", "llama-3.3-70b-versatile"),
     "Gemini（免费）": ("https://generativelanguage.googleapis.com/v1beta/openai/", "gemini-2.0-flash"),
@@ -453,20 +522,22 @@ else:
     ai_model = default_model
     st.caption(f"Base URL: `{ai_url}`　模型: `{ai_model}`")
 
-# ── 代理配置 ───────────────────────────────────────────
-st.header("3. 代理配置（国内必填）")
-use_proxy = st.checkbox("使用代理", value=bool(env.get("PROXY_HOST")))
-if use_proxy:
-    col1, col2 = st.columns(2)
-    with col1:
-        proxy_host = st.text_input("代理地址", value=env.get("PROXY_HOST", "127.0.0.1"))
-    with col2:
-        proxy_port = st.text_input("端口", value=env.get("PROXY_PORT", "50656"))
-else:
-    proxy_host = proxy_port = ""
+# ── 网络高级配置 ───────────────────────────────────────
+with st.expander("网络与代理（高级）", expanded=False):
+    st.caption("只有在当前网络环境无法直连 Telegram 或 AI 服务时才需要配置")
+    use_proxy = st.checkbox("使用代理", value=bool(env.get("PROXY_HOST")))
+    if use_proxy:
+        col1, col2 = st.columns(2)
+        with col1:
+            proxy_host = st.text_input("代理地址", value=env.get("PROXY_HOST", "127.0.0.1"))
+        with col2:
+            proxy_port = st.text_input("端口", value=env.get("PROXY_PORT", "50656"))
+    else:
+        proxy_host = proxy_port = ""
 
 # ── 角色配置 ───────────────────────────────────────────
-st.header("4. 角色配置")
+st.subheader("角色配置")
+st.caption("这里只填角色资料；真正的 Telegram 登录放到下一步完成。")
 
 import json as _json
 
@@ -522,392 +593,345 @@ for _char in chars_input:
         break
     _phone_seen[_phone] = _char["name"]
 
-# ── 回复行为配置 ───────────────────────────────────────
-st.header("5. 回复行为")
-
-always_reply = st.toggle(
-    "每条消息都回复",
-    value=env.get("ALWAYS_REPLY", "true") == "true",
-    help="开启后两个角色会回复每一条消息；关闭后按概率随机决定是否回复"
-)
-
-col1, col2 = st.columns(2)
-with col1:
-    delay_min = st.number_input("回复最短延迟（秒）", value=safe_int(env.get("REPLY_DELAY_MIN"), 5), min_value=0,
-                                 help="收到消息后最少等多久再回，模拟真人思考")
-with col2:
-    delay_max = st.number_input("回复最长延迟（秒）", value=safe_int(env.get("REPLY_DELAY_MAX"), 15), min_value=0,
-                                 help="收到消息后最多等多久再回")
-
-col1, col2 = st.columns(2)
-with col1:
-    cooldown_human = st.number_input(
-        "回复真人的冷却时间（秒）",
-        value=safe_int(env.get("MIN_SECONDS_BETWEEN_REPLIES_HUMAN"), 30),
-        min_value=0,
-        help="同一角色两次回复真人之间的最短间隔"
-    )
-with col2:
-    cooldown_ai = st.number_input(
-        "角色互聊的冷却时间（秒）",
-        value=safe_int(env.get("MIN_SECONDS_BETWEEN_REPLIES_CHARACTER"), 5),
-        min_value=0,
-        help="两个AI角色互相回复之间的最短间隔，越小对话越连贯"
-    )
-
-# ── 话题配置 ───────────────────────────────────────────
-st.header("6. 自动发话题")
-col1, col2 = st.columns(2)
-with col1:
-    topic_interval = st.number_input("发话题间隔（秒）", value=safe_int(env.get("TOPIC_INTERVAL"), 1800), min_value=60,
-                                      help="无人说话时多久自动发起一个新话题，1800=30分钟")
-with col2:
-    topic_start = st.number_input("启动后多久发第一个话题（秒）", value=safe_int(env.get("TOPIC_START_DELAY"), 30), min_value=5)
-
-ALL_DIRECTIONS = [
-    "工作、加班、老板、同事",
-    "吃饭、外卖、今天吃什么",
-    "钱、消费、买了什么",
-    "手机、App、刷到的内容",
-    "睡眠、作息、熬夜",
-    "交通、堵车、出行",
-    "游戏、娱乐、追剧",
-    "朋友、聚会、社交",
-    "天气、季节、身体状态",
-    "随便一件今天发生的小事",
-]
-saved_enabled = env.get("TOPIC_DIRECTIONS_ENABLED", "")
-saved_list = saved_enabled.split("||") if saved_enabled else ALL_DIRECTIONS
-
-# 用户自定义话题（保存在 .env 里，用 || 分隔）
-saved_custom = env.get("TOPIC_DIRECTIONS_CUSTOM", "")
-custom_list = [d for d in saved_custom.split("||") if d.strip()] if saved_custom else []
-
-# 合并预设 + 自定义，构成完整选项列表
-all_options = ALL_DIRECTIONS + custom_list
-
-col1, col2 = st.columns([4, 1])
-with col1:
-    new_direction = st.text_input("添加自定义话题方向", placeholder="如：健身、减肥、运动", label_visibility="visible")
-with col2:
-    st.markdown("<br>", unsafe_allow_html=True)
-    if st.button("添加", use_container_width=True):
-        if new_direction.strip() and new_direction.strip() not in all_options:
-            custom_list.append(new_direction.strip())
-            all_options = ALL_DIRECTIONS + custom_list
-            st.rerun()
-
-topic_directions = st.multiselect(
-    "话题方向（勾选后 AI 只在这些范围内轮换）",
-    options=all_options,
-    default=[d for d in saved_list if d in all_options],
-    help="至少选一个，不选则使用全部"
-)
-
-st.header("7. 账号登录")
-for char in ensure_character_ids(chars_input):
-    char_id = char["id"]
-    login_state_key = f"login_status_{char_id}"
-    login_meta_key = f"login_meta_{char_id}"
-    code_hash_key = f"code_hash_{char_id}"
-    code_input_key = f"code_input_{char_id}"
-    password_input_key = f"password_input_{char_id}"
-
-    with st.expander(f"登录：{char['name']}", expanded=False):
-        st.caption(f"Session: `{session_file_for_character(char_id)}`")
-        st.caption(f"角色配置手机号尾号：`{format_phone_suffix(char.get('phone'))}`")
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            if st.button("检查登录状态", key=f"check_login_{char_id}", use_container_width=True):
-                try:
-                    normalized_chars = persist_form_state(
-                        api_id=api_id,
-                        api_hash=api_hash,
-                        group_id=group_id,
-                        ai_key=ai_key,
-                        ai_url=ai_url,
-                        ai_model=ai_model,
-                        characters=chars_input,
-                        always_reply=always_reply,
-                        delay_min=delay_min,
-                        delay_max=delay_max,
-                        cooldown_human=cooldown_human,
-                        cooldown_ai=cooldown_ai,
-                        topic_interval=topic_interval,
-                        topic_start=topic_start,
-                        topic_directions=topic_directions,
-                        custom_list=custom_list,
-                        use_proxy=use_proxy,
-                        proxy_host=proxy_host,
-                        proxy_port=proxy_port,
-                    )
-                    current_character = next(item for item in normalized_chars if item["id"] == char_id)
-                    status = asyncio.run(
-                        get_login_status(api_id, api_hash, proxy_host, proxy_port, current_character)
-                    )
-                    st.session_state[login_state_key] = status["label"]
-                    st.session_state[login_meta_key] = status
-                except Exception as e:
-                    st.session_state[login_state_key] = f"检查失败：{e}"
-        with col2:
-            if st.button("发送验证码", key=f"send_code_{char_id}", use_container_width=True):
-                try:
-                    normalized_chars = persist_form_state(
-                        api_id=api_id,
-                        api_hash=api_hash,
-                        group_id=group_id,
-                        ai_key=ai_key,
-                        ai_url=ai_url,
-                        ai_model=ai_model,
-                        characters=chars_input,
-                        always_reply=always_reply,
-                        delay_min=delay_min,
-                        delay_max=delay_max,
-                        cooldown_human=cooldown_human,
-                        cooldown_ai=cooldown_ai,
-                        topic_interval=topic_interval,
-                        topic_start=topic_start,
-                        topic_directions=topic_directions,
-                        custom_list=custom_list,
-                        use_proxy=use_proxy,
-                        proxy_host=proxy_host,
-                        proxy_port=proxy_port,
-                    )
-                    current_character = next(item for item in normalized_chars if item["id"] == char_id)
-                    result = asyncio.run(
-                        send_login_code(api_id, api_hash, proxy_host, proxy_port, current_character)
-                    )
-                    if result["status"] == "already":
-                        st.session_state[login_state_key] = f"已登录：{result['account']}"
-                        st.session_state[login_meta_key] = {
-                            "ok": True,
-                            "account": result["account"],
-                            "phone": None,
-                            "match": True,
-                        }
-                        st.session_state.pop(code_hash_key, None)
-                    else:
-                        st.session_state[code_hash_key] = result["phone_code_hash"]
-                        st.session_state[login_state_key] = "验证码已发送"
-                except Exception as e:
-                    st.session_state[login_state_key] = f"发送失败：{e}"
-        with col3:
-            if st.button("重置 Session", key=f"reset_session_{char_id}", use_container_width=True):
-                clear_character_session(char_id)
-                st.session_state.pop(login_state_key, None)
-                st.session_state.pop(login_meta_key, None)
-                st.session_state.pop(code_hash_key, None)
-                st.session_state.pop(code_input_key, None)
-                st.session_state.pop(password_input_key, None)
-                set_app_notice("success", "当前角色 session 已清除")
-                st.rerun()
-
-        login_state = st.session_state.get(login_state_key)
-        login_meta = st.session_state.get(login_meta_key)
-        if login_meta and login_meta.get('ok'):
-            actual_phone_suffix = format_phone_suffix(login_meta.get('phone'))
-            if login_meta.get('match'):
-                st.success(f"✅ 已登录：{login_meta['account']}（尾号 {actual_phone_suffix}）")
-            else:
-                st.error(f"⚠️ 已登录：{login_meta['account']}（尾号 {actual_phone_suffix}）— 手机号与角色配置不一致，建议重置 Session 后重新登录")
-        elif login_state:
-            if "失败" in login_state or "错误" in login_state:
-                st.error(f"❌ {login_state}")
-            elif "未登录" in login_state:
-                st.warning(f"⚠️ {login_state}")
-            else:
-                st.info(f"ℹ️ {login_state}")
-        else:
-            st.caption("未检查登录状态")
-
-        if st.session_state.get(code_hash_key):
-            st.text_input("验证码", key=code_input_key, placeholder="输入 Telegram 发来的验证码")
-            st.text_input("二步验证密码", key=password_input_key, type="password", placeholder="若未开启可留空")
-            if st.button("完成登录", key=f"finish_login_{char_id}", use_container_width=True):
-                try:
-                    normalized_chars = persist_form_state(
-                        api_id=api_id,
-                        api_hash=api_hash,
-                        group_id=group_id,
-                        ai_key=ai_key,
-                        ai_url=ai_url,
-                        ai_model=ai_model,
-                        characters=chars_input,
-                        always_reply=always_reply,
-                        delay_min=delay_min,
-                        delay_max=delay_max,
-                        cooldown_human=cooldown_human,
-                        cooldown_ai=cooldown_ai,
-                        topic_interval=topic_interval,
-                        topic_start=topic_start,
-                        topic_directions=topic_directions,
-                        custom_list=custom_list,
-                        use_proxy=use_proxy,
-                        proxy_host=proxy_host,
-                        proxy_port=proxy_port,
-                    )
-                    current_character = next(item for item in normalized_chars if item["id"] == char_id)
-                    result = asyncio.run(
-                        complete_login(
-                            api_id,
-                            api_hash,
-                            proxy_host,
-                            proxy_port,
-                            current_character,
-                            st.session_state.get(code_input_key, "").strip(),
-                            st.session_state.get(code_hash_key, ""),
-                            st.session_state.get(password_input_key, "").strip(),
-                        )
-                    )
-                    if result["status"] == "password_required":
-                        st.session_state[login_state_key] = "该账号已开启二步验证，请输入密码后再试"
-                    else:
-                        st.session_state.pop(code_hash_key, None)
-                        # 登录成功后自动检查登录状态，获取真实手机号匹配结果
-                        for _attempt in range(2):
-                            try:
-                                status = asyncio.run(
-                                    get_login_status(api_id, api_hash, proxy_host, proxy_port, current_character)
-                                )
-                                st.session_state[login_state_key] = status["label"]
-                                st.session_state[login_meta_key] = status
-                                set_app_notice("success", f"{char['name']} 登录成功：{status['label']}")
-                                break
-                            except Exception as check_err:
-                                if _attempt == 1:
-                                    st.session_state[login_state_key] = f"状态未知：{check_err}"
-                                    st.session_state.pop(login_meta_key, None)
-                                    set_app_notice("warning", f"无法确认登录结果，请手动点击检查登录状态：{check_err}")
-                except Exception as e:
-                    st.session_state[login_state_key] = f"登录失败：{e}"
-
-with st.expander("快速查看已登录群组 ID"):
-    st.caption("读取当前已登录 Telegram 账号可见的群组，并可一键填入上面的群组 ID")
-    if st.button("读取群组列表", use_container_width=True):
-        try:
-            normalized_chars = persist_form_state(
-                api_id=api_id,
-                api_hash=api_hash,
-                group_id=group_id,
-                ai_key=ai_key,
-                ai_url=ai_url,
-                ai_model=ai_model,
-                characters=chars_input,
-                always_reply=always_reply,
-                delay_min=delay_min,
-                delay_max=delay_max,
-                cooldown_human=cooldown_human,
-                cooldown_ai=cooldown_ai,
-                topic_interval=topic_interval,
-                topic_start=topic_start,
-                topic_directions=topic_directions,
-                custom_list=custom_list,
-                use_proxy=use_proxy,
-                proxy_host=proxy_host,
-                proxy_port=proxy_port,
-            )
-            st.session_state.group_choices = asyncio.run(
-                fetch_group_choices(
-                    api_id=api_id,
-                    api_hash=api_hash,
-                    proxy_host=proxy_host,
-                    proxy_port=proxy_port,
-                    characters=normalized_chars,
-                )
-            )
-            set_app_notice("success", f"已读取到 {len(st.session_state.group_choices)} 个群组")
-        except Exception as e:
-            st.session_state.group_choices = []
-            set_app_notice("error", f"读取失败：{e}")
-
-    group_choices = st.session_state.get("group_choices", [])
-    if group_choices:
-        group_filter = st.text_input("搜索群组名", placeholder="输入关键词过滤", key="group_filter")
-        filtered = [g for g in group_choices if group_filter.lower() in (g.get("name") or "").lower()] if group_filter else group_choices
-        st.caption(f"共 {len(group_choices)} 个群组，显示 {len(filtered)} 个")
-    else:
-        filtered = []
-
-    for idx, item in enumerate(filtered):
-        col1, col2 = st.columns([5, 1])
-        with col1:
-            st.write(f"**{item['name']}**")
-            st.caption(f"ID: `{item['id']}` | 类型: {item['type']} | 账号: {', '.join(item['accounts'])}")
-        with col2:
-            if st.button("使用", key=f"use_group_{idx}", use_container_width=True):
-                st.session_state.pending_group_id_input = str(item["id"])
-                persist_form_state(
-                    api_id=api_id,
-                    api_hash=api_hash,
-                    group_id=str(item["id"]),
-                    ai_key=ai_key,
-                    ai_url=ai_url,
-                    ai_model=ai_model,
-                    characters=chars_input,
-                    always_reply=always_reply,
-                    delay_min=delay_min,
-                    delay_max=delay_max,
-                    cooldown_human=cooldown_human,
-                    cooldown_ai=cooldown_ai,
-                    topic_interval=topic_interval,
-                    topic_start=topic_start,
-                    topic_directions=topic_directions,
-                    custom_list=custom_list,
-                    use_proxy=use_proxy,
-                    proxy_host=proxy_host,
-                    proxy_port=proxy_port,
-                )
-                st.rerun()
-
-# ── 保存 & 启动 ────────────────────────────────────────
 st.divider()
-col1, col2, col3 = st.columns(3)
+overview1, overview2, overview3, overview4 = st.columns(4)
+overview1.caption("步骤 1")
+overview1.write(f"**基础配置**")
+overview1.caption(summarize_basic_config(api_id, api_hash, ai_key, chars_input))
+overview2.caption("步骤 2")
+overview2.write("**登录账号**")
+overview2.caption(summarize_login_step(ensure_character_ids(chars_input)))
+overview3.caption("步骤 3")
+overview3.write("**选择群组**")
+overview3.caption(summarize_group_step(group_id))
+overview4.caption("步骤 4")
+overview4.write("**启动运行**")
+overview4.caption(summarize_runtime_step())
 
-with col1:
-    if st.button("💾 保存配置", use_container_width=True):
-        # 检查重复手机号
-        seen_phones: dict[str, str] = {}
-        phone_conflict = None
-        for char in chars_input:
-            phone = (char.get("phone") or "").strip()
-            if not phone:
-                continue
-            if phone in seen_phones:
-                phone_conflict = f"手机号 {phone} 同时被「{seen_phones[phone]}」和「{char['name']}」使用，每个角色必须使用独立的手机号"
-                break
-            seen_phones[phone] = char["name"]
+login_section = st.container()
+group_section = st.container()
+start_section = st.container()
+advanced_section = st.container()
 
-        if phone_conflict:
-            set_app_notice("error", phone_conflict)
-        else:
-            persist_form_state(
-                api_id=api_id,
-                api_hash=api_hash,
-                group_id=group_id,
-                ai_key=ai_key,
-                ai_url=ai_url,
-                ai_model=ai_model,
-                characters=chars_input,
-                always_reply=always_reply,
-                delay_min=delay_min,
-                delay_max=delay_max,
-                cooldown_human=cooldown_human,
-                cooldown_ai=cooldown_ai,
-                topic_interval=topic_interval,
-                topic_start=topic_start,
-                topic_directions=topic_directions,
-                custom_list=custom_list,
-                use_proxy=use_proxy,
-                proxy_host=proxy_host,
-                proxy_port=proxy_port,
+# ── 回复行为配置 ───────────────────────────────────────
+with advanced_section:
+    with st.expander("高级设置", expanded=False):
+        st.caption("这些参数不是首次使用必填项。第一次使用时可以先跳过，等账号登录并跑起来后再回来微调。")
+
+        st.subheader("回复行为")
+
+        always_reply = st.toggle(
+            "每条消息都回复",
+            value=env.get("ALWAYS_REPLY", "true") == "true",
+            help="开启后两个角色会回复每一条消息；关闭后按概率随机决定是否回复"
+        )
+
+        saved_reply_strategy = env.get("REPLY_ASSIGNMENT_STRATEGY", "random")
+        if saved_reply_strategy not in REPLY_STRATEGY_OPTIONS:
+            saved_reply_strategy = "random"
+        reply_assignment_strategy = st.selectbox(
+            "回复角色分配策略",
+            options=list(REPLY_STRATEGY_OPTIONS.keys()),
+            index=list(REPLY_STRATEGY_OPTIONS.keys()).index(saved_reply_strategy),
+            format_func=lambda key: REPLY_STRATEGY_OPTIONS[key],
+            help="随机分配是当前策略；轮流回复更平均；最近最久没发言更能避免某个角色长期沉默。"
+        )
+
+        saved_interaction_mode = env.get("INTERACTION_MODE", "mixed")
+        if saved_interaction_mode not in INTERACTION_MODE_OPTIONS:
+            saved_interaction_mode = "mixed"
+        interaction_mode = st.selectbox(
+            "对话模式",
+            options=list(INTERACTION_MODE_OPTIONS.keys()),
+            index=list(INTERACTION_MODE_OPTIONS.keys()).index(saved_interaction_mode),
+            format_func=lambda key: INTERACTION_MODE_OPTIONS[key],
+            help="正常模式会响应真人消息；只让角色互聊模式会忽略真人消息，只保留角色之间的接话和自动话题。"
+        )
+
+        col1, col2 = st.columns(2)
+        with col1:
+            delay_min = st.number_input("回复最短延迟（秒）", value=safe_int(env.get("REPLY_DELAY_MIN"), 5), min_value=0,
+                                         help="收到消息后最少等多久再回，模拟真人思考")
+        with col2:
+            delay_max = st.number_input("回复最长延迟（秒）", value=safe_int(env.get("REPLY_DELAY_MAX"), 15), min_value=0,
+                                         help="收到消息后最多等多久再回")
+
+        with st.expander("高级回复设置", expanded=False):
+            col1, col2 = st.columns(2)
+            with col1:
+                cooldown_human = st.number_input(
+                    "回复真人的冷却时间（秒）",
+                    value=safe_int(env.get("MIN_SECONDS_BETWEEN_REPLIES_HUMAN"), 30),
+                    min_value=0,
+                    help="同一角色两次回复真人之间的最短间隔"
+                )
+            with col2:
+                cooldown_ai = st.number_input(
+                    "角色互聊的冷却时间（秒）",
+                    value=safe_int(env.get("MIN_SECONDS_BETWEEN_REPLIES_CHARACTER"), 5),
+                    min_value=0,
+                    help="两个AI角色互相回复之间的最短间隔，越小对话越连贯"
+                )
+
+        st.subheader("自动发话题")
+        topic_interval = st.number_input(
+            "发话题间隔（秒）",
+            value=safe_int(env.get("TOPIC_INTERVAL"), 1800),
+            min_value=60,
+            help="无人说话时多久自动发起一个新话题，1800=30分钟"
+        )
+
+        ALL_DIRECTIONS = [
+            "工作、加班、老板、同事",
+            "吃饭、外卖、今天吃什么",
+            "钱、消费、买了什么",
+            "手机、App、刷到的内容",
+            "睡眠、作息、熬夜",
+            "交通、堵车、出行",
+            "游戏、娱乐、追剧",
+            "朋友、聚会、社交",
+            "天气、季节、身体状态",
+            "随便一件今天发生的小事",
+        ]
+        saved_enabled = env.get("TOPIC_DIRECTIONS_ENABLED", "")
+        saved_list = saved_enabled.split("||") if saved_enabled else ALL_DIRECTIONS
+
+        # 用户自定义话题（保存在 .env 里，用 || 分隔）
+        saved_custom = env.get("TOPIC_DIRECTIONS_CUSTOM", "")
+        custom_list = [d for d in saved_custom.split("||") if d.strip()] if saved_custom else []
+
+        # 合并预设 + 自定义，构成完整选项列表
+        all_options = ALL_DIRECTIONS + custom_list
+
+        with st.expander("高级话题设置", expanded=False):
+            topic_start = st.number_input(
+                "启动后多久发第一个话题（秒）",
+                value=safe_int(env.get("TOPIC_START_DELAY"), 30),
+                min_value=5
             )
-            set_app_notice("success", "配置已保存！")
 
-with col2:
-    if st.button("▶ 启动机器人", use_container_width=True, type="primary"):
-        if is_running():
-            set_app_notice("warning", "机器人已在运行中")
+            col1, col2 = st.columns([4, 1])
+            with col1:
+                new_direction = st.text_input("添加自定义话题方向", placeholder="如：健身、减肥、运动", label_visibility="visible")
+            with col2:
+                st.markdown("<br>", unsafe_allow_html=True)
+                if st.button("添加", use_container_width=True):
+                    if new_direction.strip() and new_direction.strip() not in all_options:
+                        custom_list.append(new_direction.strip())
+                        all_options = ALL_DIRECTIONS + custom_list
+                        st.rerun()
+
+            topic_directions = st.multiselect(
+                "话题方向（勾选后 AI 只在这些范围内轮换）",
+                options=all_options,
+                default=[d for d in saved_list if d in all_options],
+                help="至少选一个，不选则使用全部"
+            )
+
+with login_section:
+    st.header("2. 登录账号")
+    st.caption("按角色逐个完成登录。已登录的账号会保留 session，之后回来一般不需要重登。")
+    for char in ensure_character_ids(chars_input):
+        char_id = char["id"]
+        login_state_key = f"login_status_{char_id}"
+        login_meta_key = f"login_meta_{char_id}"
+        code_hash_key = f"code_hash_{char_id}"
+        code_input_key = f"code_input_{char_id}"
+        password_input_key = f"password_input_{char_id}"
+
+        has_pending_code = bool(st.session_state.get(code_hash_key))
+        login_meta = st.session_state.get(login_meta_key)
+        if login_meta and login_meta.get("ok"):
+            status_text = f"已登录：{login_meta['account']}"
+        elif has_pending_code:
+            status_text = "等待输入验证码"
+        elif os.path.exists(session_file_for_character(char_id)):
+            status_text = "检测到本地 session，建议点检查登录状态确认"
         else:
+            status_text = "未登录"
+
+        with st.expander(f"{char['name']} | {status_text}", expanded=has_pending_code):
+            st.caption(f"Session: `{session_file_for_character(char_id)}`")
+            st.caption(f"角色配置手机号尾号：`{format_phone_suffix(char.get('phone'))}`")
+            st.info("推荐顺序：先发送验证码，再输入验证码完成登录；只有换号或登录错账号时才需要重置 Session。")
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                if st.button("检查登录状态", key=f"check_login_{char_id}", use_container_width=True):
+                    try:
+                        normalized_chars = persist_form_state(
+                            api_id=api_id,
+                            api_hash=api_hash,
+                            group_id=group_id,
+                            ai_key=ai_key,
+                            ai_url=ai_url,
+                            ai_model=ai_model,
+                            characters=chars_input,
+                            always_reply=always_reply,
+                            reply_assignment_strategy=reply_assignment_strategy,
+                            interaction_mode=interaction_mode,
+                            delay_min=delay_min,
+                            delay_max=delay_max,
+                            cooldown_human=cooldown_human,
+                            cooldown_ai=cooldown_ai,
+                            topic_interval=topic_interval,
+                            topic_start=topic_start,
+                            topic_directions=topic_directions,
+                            custom_list=custom_list,
+                            use_proxy=use_proxy,
+                            proxy_host=proxy_host,
+                            proxy_port=proxy_port,
+                        )
+                        current_character = next(item for item in normalized_chars if item["id"] == char_id)
+                        status = asyncio.run(
+                            get_login_status(api_id, api_hash, proxy_host, proxy_port, current_character)
+                        )
+                        st.session_state[login_state_key] = status["label"]
+                        st.session_state[login_meta_key] = status
+                    except Exception as e:
+                        st.session_state[login_state_key] = f"检查失败：{e}"
+            with col2:
+                if st.button("发送验证码", key=f"send_code_{char_id}", use_container_width=True):
+                    try:
+                        normalized_chars = persist_form_state(
+                            api_id=api_id,
+                            api_hash=api_hash,
+                            group_id=group_id,
+                            ai_key=ai_key,
+                            ai_url=ai_url,
+                            ai_model=ai_model,
+                            characters=chars_input,
+                            always_reply=always_reply,
+                            reply_assignment_strategy=reply_assignment_strategy,
+                            interaction_mode=interaction_mode,
+                            delay_min=delay_min,
+                            delay_max=delay_max,
+                            cooldown_human=cooldown_human,
+                            cooldown_ai=cooldown_ai,
+                            topic_interval=topic_interval,
+                            topic_start=topic_start,
+                            topic_directions=topic_directions,
+                            custom_list=custom_list,
+                            use_proxy=use_proxy,
+                            proxy_host=proxy_host,
+                            proxy_port=proxy_port,
+                        )
+                        current_character = next(item for item in normalized_chars if item["id"] == char_id)
+                        result = asyncio.run(
+                            send_login_code(api_id, api_hash, proxy_host, proxy_port, current_character)
+                        )
+                        if result["status"] == "already":
+                            st.session_state[login_state_key] = f"已登录：{result['account']}"
+                            st.session_state[login_meta_key] = {
+                                "ok": True,
+                                "account": result["account"],
+                                "phone": None,
+                                "match": True,
+                            }
+                            st.session_state.pop(code_hash_key, None)
+                        else:
+                            st.session_state[code_hash_key] = result["phone_code_hash"]
+                            st.session_state[login_state_key] = "验证码已发送"
+                    except Exception as e:
+                        st.session_state[login_state_key] = f"发送失败：{e}"
+            with col3:
+                if st.button("重置 Session", key=f"reset_session_{char_id}", use_container_width=True):
+                    clear_character_session(char_id)
+                    st.session_state.pop(login_state_key, None)
+                    st.session_state.pop(login_meta_key, None)
+                    st.session_state.pop(code_hash_key, None)
+                    st.session_state.pop(code_input_key, None)
+                    st.session_state.pop(password_input_key, None)
+                    set_app_notice("success", "当前角色 session 已清除")
+                    st.rerun()
+
+            login_state = st.session_state.get(login_state_key)
+            login_meta = st.session_state.get(login_meta_key)
+            if login_meta and login_meta.get('ok'):
+                actual_phone_suffix = format_phone_suffix(login_meta.get('phone'))
+                if login_meta.get('match'):
+                    st.success(f"✅ 已登录：{login_meta['account']}（尾号 {actual_phone_suffix}）")
+                else:
+                    st.error(f"⚠️ 已登录：{login_meta['account']}（尾号 {actual_phone_suffix}）— 手机号与角色配置不一致，建议重置 Session 后重新登录")
+            elif login_state:
+                if "失败" in login_state or "错误" in login_state:
+                    st.error(f"❌ {login_state}")
+                elif "未登录" in login_state:
+                    st.warning(f"⚠️ {login_state}")
+                else:
+                    st.info(f"ℹ️ {login_state}")
+            else:
+                st.caption("未检查登录状态")
+
+            if st.session_state.get(code_hash_key):
+                st.text_input("验证码", key=code_input_key, placeholder="输入 Telegram 发来的验证码")
+                st.text_input("二步验证密码", key=password_input_key, type="password", placeholder="若未开启可留空")
+                if st.button("完成登录", key=f"finish_login_{char_id}", use_container_width=True):
+                    try:
+                        normalized_chars = persist_form_state(
+                            api_id=api_id,
+                            api_hash=api_hash,
+                            group_id=group_id,
+                            ai_key=ai_key,
+                            ai_url=ai_url,
+                            ai_model=ai_model,
+                            characters=chars_input,
+                            always_reply=always_reply,
+                            reply_assignment_strategy=reply_assignment_strategy,
+                            interaction_mode=interaction_mode,
+                            delay_min=delay_min,
+                            delay_max=delay_max,
+                            cooldown_human=cooldown_human,
+                            cooldown_ai=cooldown_ai,
+                            topic_interval=topic_interval,
+                            topic_start=topic_start,
+                            topic_directions=topic_directions,
+                            custom_list=custom_list,
+                            use_proxy=use_proxy,
+                            proxy_host=proxy_host,
+                            proxy_port=proxy_port,
+                        )
+                        current_character = next(item for item in normalized_chars if item["id"] == char_id)
+                        result = asyncio.run(
+                            complete_login(
+                                api_id,
+                                api_hash,
+                                proxy_host,
+                                proxy_port,
+                                current_character,
+                                st.session_state.get(code_input_key, "").strip(),
+                                st.session_state.get(code_hash_key, ""),
+                                st.session_state.get(password_input_key, "").strip(),
+                            )
+                        )
+                        if result["status"] == "password_required":
+                            st.session_state[login_state_key] = "该账号已开启二步验证，请输入密码后再试"
+                        else:
+                            st.session_state.pop(code_hash_key, None)
+                            # 登录成功后自动检查登录状态，获取真实手机号匹配结果
+                            for _attempt in range(2):
+                                try:
+                                    status = asyncio.run(
+                                        get_login_status(api_id, api_hash, proxy_host, proxy_port, current_character)
+                                    )
+                                    st.session_state[login_state_key] = status["label"]
+                                    st.session_state[login_meta_key] = status
+                                    set_app_notice("success", f"{char['name']} 登录成功：{status['label']}")
+                                    break
+                                except Exception as check_err:
+                                    if _attempt == 1:
+                                        st.session_state[login_state_key] = f"状态未知：{check_err}"
+                                        st.session_state.pop(login_meta_key, None)
+                                        set_app_notice("warning", f"无法确认登录结果，请手动点击检查登录状态：{check_err}")
+                    except Exception as e:
+                        st.session_state[login_state_key] = f"登录失败：{e}"
+with group_section:
+    st.header("3. 选择群组")
+    st.caption("从已登录账号可见的群组里选择一个，系统会自动填入群组 ID。之后你也可以手动改。")
+    group_id = st.text_input("当前群组 ID（负数，如 -1002278401337）", key="group_id_input")
+
+    with st.expander("读取并选择群组", expanded=not bool((group_id or "").strip())):
+        st.caption("读取当前已登录 Telegram 账号可见的群组，并可一键填入上面的群组 ID")
+        if st.button("读取群组列表", use_container_width=True):
             try:
                 normalized_chars = persist_form_state(
                     api_id=api_id,
@@ -918,6 +942,8 @@ with col2:
                     ai_model=ai_model,
                     characters=chars_input,
                     always_reply=always_reply,
+                    reply_assignment_strategy=reply_assignment_strategy,
+                    interaction_mode=interaction_mode,
                     delay_min=delay_min,
                     delay_max=delay_max,
                     cooldown_human=cooldown_human,
@@ -930,51 +956,182 @@ with col2:
                     proxy_host=proxy_host,
                     proxy_port=proxy_port,
                 )
-                all_ready, missing = asyncio.run(
-                    all_characters_logged_in(api_id, api_hash, proxy_host, proxy_port, normalized_chars)
+                st.session_state.group_choices = asyncio.run(
+                    fetch_group_choices(
+                        api_id=api_id,
+                        api_hash=api_hash,
+                        proxy_host=proxy_host,
+                        proxy_port=proxy_port,
+                        characters=normalized_chars,
+                    )
                 )
-                if not all_ready:
-                    set_app_notice("error", f"以下角色尚未登录，先在页面里完成验证码登录：{', '.join(missing)}")
-                else:
-                    start_bot()
-                    set_app_notice("success", "机器人已启动！")
+                set_app_notice("success", f"已读取到 {len(st.session_state.group_choices)} 个群组")
             except Exception as e:
-                set_app_notice("error", f"启动前检查失败：{e}")
+                st.session_state.group_choices = []
+                set_app_notice("error", f"读取失败：{e}")
 
-with col3:
-    if st.button("⏹ 停止机器人", use_container_width=True):
-        if is_running():
-            stop_bot()
-            set_app_notice("success", "已停止")
+        group_choices = st.session_state.get("group_choices", [])
+        if group_choices:
+            group_filter = st.text_input("搜索群组名", placeholder="输入关键词过滤", key="group_filter")
+            filtered = [g for g in group_choices if group_filter.lower() in (g.get("name") or "").lower()] if group_filter else group_choices
+            st.caption(f"共 {len(group_choices)} 个群组，显示 {len(filtered)} 个")
         else:
-            set_app_notice("warning", "机器人未在运行")
+            filtered = []
 
-# ── 状态 & 日志 ────────────────────────────────────────
-st.divider()
-status = "🟢 运行中" if is_running() else "🔴 未运行"
-st.markdown(f"**机器人状态：{status}**")
+        for idx, item in enumerate(filtered):
+            col1, col2 = st.columns([5, 1])
+            with col1:
+                st.write(f"**{item['name']}**")
+                st.caption(f"ID: `{item['id']}` | 类型: {item['type']} | 账号: {', '.join(item['accounts'])}")
+            with col2:
+                if st.button("使用", key=f"use_group_{idx}", use_container_width=True):
+                    st.session_state.pending_group_id_input = str(item["id"])
+                    persist_form_state(
+                        api_id=api_id,
+                        api_hash=api_hash,
+                        group_id=str(item["id"]),
+                        ai_key=ai_key,
+                        ai_url=ai_url,
+                        ai_model=ai_model,
+                        characters=chars_input,
+                        always_reply=always_reply,
+                        reply_assignment_strategy=reply_assignment_strategy,
+                        interaction_mode=interaction_mode,
+                        delay_min=delay_min,
+                        delay_max=delay_max,
+                        cooldown_human=cooldown_human,
+                        cooldown_ai=cooldown_ai,
+                        topic_interval=topic_interval,
+                        topic_start=topic_start,
+                        topic_directions=topic_directions,
+                        custom_list=custom_list,
+                        use_proxy=use_proxy,
+                        proxy_host=proxy_host,
+                        proxy_port=proxy_port,
+                    )
+                    st.rerun()
 
-if st.checkbox("查看运行日志"):
-    log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat.log")
-
-    col1, col2, col3, col4 = st.columns([1, 1, 1, 3])
+# ── 保存 & 启动 ────────────────────────────────────────
+with start_section:
+    st.header("4. 启动运行")
+    st.caption("前 3 步完成后，在这里保存配置、启动机器人，并查看运行日志。")
+    st.divider()
+    col1, col2, col3 = st.columns(3)
     with col1:
-        st.button("刷新日志")
+        if st.button("💾 保存配置", use_container_width=True):
+            # 检查重复手机号
+            seen_phones: dict[str, str] = {}
+            phone_conflict = None
+            for char in chars_input:
+                phone = (char.get("phone") or "").strip()
+                if not phone:
+                    continue
+                if phone in seen_phones:
+                    phone_conflict = f"手机号 {phone} 同时被「{seen_phones[phone]}」和「{char['name']}」使用，每个角色必须使用独立的手机号"
+                    break
+                seen_phones[phone] = char["name"]
+
+            if phone_conflict:
+                set_app_notice("error", phone_conflict)
+            else:
+                persist_form_state(
+                    api_id=api_id,
+                    api_hash=api_hash,
+                    group_id=group_id,
+                    ai_key=ai_key,
+                    ai_url=ai_url,
+                    ai_model=ai_model,
+                    characters=chars_input,
+                    always_reply=always_reply,
+                    reply_assignment_strategy=reply_assignment_strategy,
+                    interaction_mode=interaction_mode,
+                    delay_min=delay_min,
+                    delay_max=delay_max,
+                    cooldown_human=cooldown_human,
+                    cooldown_ai=cooldown_ai,
+                    topic_interval=topic_interval,
+                    topic_start=topic_start,
+                    topic_directions=topic_directions,
+                    custom_list=custom_list,
+                    use_proxy=use_proxy,
+                    proxy_host=proxy_host,
+                    proxy_port=proxy_port,
+                )
+                set_app_notice("success", "配置已保存！")
+
     with col2:
-        auto_refresh = st.checkbox("自动刷新", value=False)
+        if st.button("▶ 启动机器人", use_container_width=True, type="primary"):
+            if is_running():
+                set_app_notice("warning", "机器人已在运行中")
+            else:
+                try:
+                    normalized_chars = persist_form_state(
+                        api_id=api_id,
+                        api_hash=api_hash,
+                        group_id=group_id,
+                        ai_key=ai_key,
+                        ai_url=ai_url,
+                        ai_model=ai_model,
+                        characters=chars_input,
+                        always_reply=always_reply,
+                        reply_assignment_strategy=reply_assignment_strategy,
+                        interaction_mode=interaction_mode,
+                        delay_min=delay_min,
+                        delay_max=delay_max,
+                        cooldown_human=cooldown_human,
+                        cooldown_ai=cooldown_ai,
+                        topic_interval=topic_interval,
+                        topic_start=topic_start,
+                        topic_directions=topic_directions,
+                        custom_list=custom_list,
+                        use_proxy=use_proxy,
+                        proxy_host=proxy_host,
+                        proxy_port=proxy_port,
+                    )
+                    all_ready, missing = asyncio.run(
+                        all_characters_logged_in(api_id, api_hash, proxy_host, proxy_port, normalized_chars)
+                    )
+                    if not all_ready:
+                        set_app_notice("error", f"以下角色尚未登录，先在页面里完成验证码登录：{', '.join(missing)}")
+                    else:
+                        start_bot()
+                        set_app_notice("success", "机器人已启动！")
+                except Exception as e:
+                    set_app_notice("error", f"启动前检查失败：{e}")
+
     with col3:
-        if st.button("清空日志", use_container_width=True):
-            open(log_path, "w", encoding="utf-8").close()
-            set_app_notice("success", "日志已清空")
-    with col4:
-        refresh_interval = st.number_input("间隔（秒）", value=5, min_value=1, max_value=60, label_visibility="collapsed" if not auto_refresh else "visible")
+        if st.button("⏹ 停止机器人", use_container_width=True):
+            if is_running():
+                stop_bot()
+                set_app_notice("success", "已停止")
+            else:
+                set_app_notice("warning", "机器人未在运行")
 
-    if os.path.exists(log_path):
-        lines = open(log_path, encoding="utf-8", errors="replace").readlines()
-        st.code("".join(lines[-50:]), language="text")
-    else:
-        st.info("暂无日志")
+    st.divider()
+    status = "🟢 运行中" if is_running() else "🔴 未运行"
+    st.markdown(f"**机器人状态：{status}**")
 
-    if auto_refresh:
-        time.sleep(refresh_interval)
-        st.rerun()
+    if st.checkbox("查看运行日志"):
+        log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat.log")
+
+        col1, col2, col3, col4 = st.columns([1, 1, 1, 3])
+        with col1:
+            st.button("刷新日志")
+        with col2:
+            auto_refresh = st.checkbox("自动刷新", value=False)
+        with col3:
+            if st.button("清空日志", use_container_width=True):
+                open(log_path, "w", encoding="utf-8").close()
+                set_app_notice("success", "日志已清空")
+        with col4:
+            refresh_interval = st.number_input("间隔（秒）", value=5, min_value=1, max_value=60, label_visibility="collapsed" if not auto_refresh else "visible")
+
+        if os.path.exists(log_path):
+            lines = open(log_path, encoding="utf-8", errors="replace").readlines()
+            st.code("".join(lines[-50:]), language="text")
+        else:
+            st.info("暂无日志")
+
+        if auto_refresh:
+            time.sleep(refresh_interval)
+            st.rerun()

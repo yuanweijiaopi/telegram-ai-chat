@@ -53,6 +53,10 @@ chat_history = []  # 所有角色共享的聊天记录
 last_reply_at = {}
 managed_sender_ids = {}
 _reply_queue: asyncio.Queue = asyncio.Queue(maxsize=50)  # AI Town 协调器队列，限制深度防止堆积
+_queued_message_ids: set = set()  # 已入队的消息 ID，防止多个角色重复入队
+_reply_cycle_index = 0
+REPLY_ASSIGNMENT_STRATEGY = os.getenv("REPLY_ASSIGNMENT_STRATEGY", "random").strip().lower()
+INTERACTION_MODE = os.getenv("INTERACTION_MODE", "mixed").strip().lower()
 policy = merge_policy(
     BEHAVIOR_POLICY,
     {
@@ -348,9 +352,18 @@ def make_handler(client: TelegramClient, character: dict, me_id: int):
     async def handler(event):
         if not event.text or event.sender_id == me_id:
             return
+        if event.id in _queued_message_ids:
+            return
+        _queued_message_ids.add(event.id)
+        if len(_queued_message_ids) > 500:
+            oldest = sorted(_queued_message_ids)[:250]
+            for mid in oldest:
+                _queued_message_ids.discard(mid)
         sender = await event.get_sender()
         sender_name = managed_sender_ids.get(event.sender_id, getattr(sender, "first_name", "未知"))
         source = "character" if event.sender_id in managed_sender_ids else "human"
+        if INTERACTION_MODE == "character_only" and source == "human":
+            return
         print(f"[{character['name']}] 收到消息: {event.text[:30]}")
         try:
             _reply_queue.put_nowait({
@@ -364,6 +377,29 @@ def make_handler(client: TelegramClient, character: dict, me_id: int):
             log_strategy("queue_full_drop", sender=sender_name, text=event.text[:30])
 
     return handler
+
+
+def choose_reply_character(candidates: list[dict]) -> dict | None:
+    global _reply_cycle_index
+    if not candidates:
+        return None
+
+    if REPLY_ASSIGNMENT_STRATEGY == "round_robin":
+        ordered = sorted(candidates, key=lambda item: item["name"])
+        character = ordered[_reply_cycle_index % len(ordered)]
+        _reply_cycle_index += 1
+        return character
+
+    if REPLY_ASSIGNMENT_STRATEGY == "least_recent":
+        return min(
+            candidates,
+            key=lambda item: (
+                last_reply_at.get(item["name"], 0),
+                item["name"],
+            ),
+        )
+
+    return random.choice(candidates)
 
 
 async def reply_coordinator(clients: list[TelegramClient]):
@@ -399,7 +435,9 @@ async def reply_coordinator(clients: list[TelegramClient]):
             candidates = [c for c in CHARACTERS if c["name"] != sender_name]
             if not candidates:
                 continue
-            character = random.choice(candidates)
+            character = choose_reply_character(candidates)
+            if not character:
+                continue
         client = client_map[character["name"]]
 
         # 重试不再等待，直接发；首次处理才延迟+过期检查
@@ -423,6 +461,7 @@ async def reply_coordinator(clients: list[TelegramClient]):
 
             await client.send_message(GROUP_ID, reply)
             record_message(chat_history, policy, name=character["name"], text=reply, source="character")
+            last_reply_at[character["name"]] = time.time()
             print(f"[{character['name']}] {reply}")
             log_strategy("reply_sent", character=character["name"], text=reply)
 
