@@ -1,5 +1,10 @@
 .env
+.deploy.env
 sessions/
 __pycache__/
 *.pyc
 strategy.log
+.idea/
+chat.log
+.claude/
+.bot.pid

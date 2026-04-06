@@ -312,6 +312,36 @@ python -m streamlit run ui.py
 - 直接看终端输出
 - 处理验证码、二步验证等细节
 
+### 方式三：部署到服务器
+
+项目自带 `deploy.py` / `deploy.sh`，可一键同步代码到远程服务器并重启 Docker 容器。
+
+1. 创建 `.deploy.env` 文件（已在 `.gitignore` 中，不会提交）：
+
+```bash
+# .deploy.env
+export DEPLOY_REMOTE_HOST=user@your-server-ip
+export DEPLOY_REMOTE_DIR=/home/user/telegram-ai-chat
+```
+
+2. 执行部署：
+
+```bash
+source .deploy.env && python deploy.py
+```
+
+或使用 Shell 版本：
+
+```bash
+source .deploy.env && bash deploy.sh
+```
+
+说明：
+
+- 部署会通过 `rsync` 同步代码，自动排除 `.env`、`sessions/`、日志等敏感文件
+- 远程服务器需要预先安装 Docker 和 Docker Compose
+- 首次部署前需要先在服务器上手动创建 `.env` 和 `sessions/` 目录
+
 ## 日志
 
 机器人运行日志默认写入：

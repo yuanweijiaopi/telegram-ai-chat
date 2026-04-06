@@ -146,6 +146,9 @@ def is_recent_duplicate_entry(
     return False
 
 
+
+
+# ── 以下函数为旧架构（每角色独立判断）预留，当前 AI Town 协调器模式未使用 ──
 def should_reply(
     character: dict[str, Any],
     history: list[dict[str, Any]],

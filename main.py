@@ -43,6 +43,7 @@ REPLY_DELAY_MAX = int(os.getenv("REPLY_DELAY_MAX", 60))
 ai = AsyncOpenAI(
     api_key=os.getenv("AI_API_KEY"),
     base_url=os.getenv("AI_BASE_URL"),
+    timeout=30,
     # openai==1.0.0 默认会给 httpx.AsyncClient 传入已废弃的 proxies 参数；
     # 显式提供客户端，兼容当前环境中的 httpx 0.28+。
     http_client=httpx.AsyncClient(),

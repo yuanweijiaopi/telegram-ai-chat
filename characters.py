@@ -2,22 +2,7 @@
 import os
 import json
 
-BEHAVIOR_POLICY = {
-    "max_context": 12,
-    "max_history": 80,
-    "max_consecutive_ai_turns": 4,
-    "duplicate_window": 6,
-    "min_seconds_between_replies": 45,
-    "min_seconds_between_replies_human": 45,
-    "min_seconds_between_replies_character": 8,
-    "quiet_window_seconds": 180,
-    "recent_reply_window_seconds": 90,
-    "stale_pending_reply_seconds": 25,
-    "same_sender_streak_limit": 3,
-    "max_reply_sentences": 2,
-    "disable_character_cooldown": True,
-    "disable_character_move_on_cancel": True,
-}
+from behavior import DEFAULT_BEHAVIOR_POLICY as BEHAVIOR_POLICY
 
 _DEFAULT_CHARACTERS = [
     {
