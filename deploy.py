@@ -1,10 +1,11 @@
+import os
 import subprocess
 import sys
 
 
-LOCAL_DIR = "REDACTED_LOCAL_PATH"
-REMOTE_HOST = "root@REDACTED_IP"
-REMOTE_DIR = "/root/telegram-ai-chat"
+LOCAL_DIR = os.getenv("DEPLOY_LOCAL_DIR", os.path.dirname(os.path.abspath(__file__)) + "/")
+REMOTE_HOST = os.getenv("DEPLOY_REMOTE_HOST", "")
+REMOTE_DIR = os.getenv("DEPLOY_REMOTE_DIR", "")
 EXCLUDES = [
     ".venv",
     "__pycache__",
@@ -22,6 +23,16 @@ def run(cmd: list[str]) -> None:
 
 
 def main() -> int:
+    if not REMOTE_HOST or not REMOTE_DIR:
+        print(
+            "错误：请设置环境变量 DEPLOY_REMOTE_HOST 和 DEPLOY_REMOTE_DIR\n"
+            "示例：\n"
+            "  export DEPLOY_REMOTE_HOST=user@your-server-ip\n"
+            "  export DEPLOY_REMOTE_DIR=/home/user/telegram-ai-chat\n",
+            file=sys.stderr,
+        )
+        return 1
+
     rsync_cmd = ["rsync", "-av"]
     for item in EXCLUDES:
         rsync_cmd.append(f"--exclude={item}")

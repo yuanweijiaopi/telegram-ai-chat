@@ -1,3 +1,4 @@
+httpx
 telethon>=1.36.0
 openai>=1.0.0
 python-dotenv>=1.0.0
