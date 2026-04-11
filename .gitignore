@@ -8,3 +8,6 @@ strategy.log
 chat.log
 .claude/
 .bot.pid
+lottery.db
+lottery_bot.log
+lottery_bot.pid
