@@ -25,6 +25,9 @@ if notice:
     icon = "✅" if notice["level"] == "success" else ("⚠️" if notice["level"] == "warning" else "❌")
     st.toast(notice["message"], icon=icon)
 
+if "pending_new_topic_direction" in st.session_state:
+    st.session_state["new_topic_direction"] = st.session_state.pop("pending_new_topic_direction")
+
 # 读取现有 .env
 env = dotenv_values(ENV_FILE) if os.path.exists(ENV_FILE) else {}
 
@@ -42,6 +45,19 @@ def load_current_env() -> dict:
 
 def set_app_notice(level: str, message: str) -> None:
     st.session_state.app_notice = {"level": level, "message": message}
+
+
+def add_custom_topic_direction() -> None:
+    new_direction = (st.session_state.get("new_topic_direction") or "").strip()
+    if not new_direction:
+        return
+
+    existing = st.session_state.get("custom_topic_directions", [])
+    if new_direction in existing:
+        return
+
+    st.session_state.custom_topic_directions = existing + [new_direction]
+    st.session_state.pending_new_topic_direction = ""
 
 
 def safe_int(value, default: int) -> int:
@@ -89,7 +105,9 @@ def stop_bot():
 
 def session_file_for_character(name: str) -> str:
     safe_name = (name or "角色").replace("/", "_").replace("\\", "_").strip()
-    return os.path.join("sessions", f"{safe_name}.session")
+    sessions_dir = "sessions"
+    os.makedirs(sessions_dir, exist_ok=True)
+    return os.path.join(sessions_dir, f"{safe_name}.session")
 
 
 def preferred_character_id(name: str, index: int) -> str:
@@ -225,6 +243,7 @@ def build_form_data(
     interaction_mode: str,
     delay_min: int,
     delay_max: int,
+    message_expiry_seconds: int,
     cooldown_human: int,
     cooldown_ai: int,
     topic_interval: int,
@@ -251,6 +270,7 @@ def build_form_data(
         "INTERACTION_MODE": interaction_mode,
         "REPLY_DELAY_MIN": str(delay_min),
         "REPLY_DELAY_MAX": str(delay_max),
+        "MESSAGE_EXPIRY_SECONDS": str(message_expiry_seconds),
         "MIN_SECONDS_BETWEEN_REPLIES_HUMAN": str(cooldown_human),
         "MIN_SECONDS_BETWEEN_REPLIES_CHARACTER": str(cooldown_ai),
         "TOPIC_INTERVAL": str(topic_interval),
@@ -281,6 +301,7 @@ def persist_form_state(
     interaction_mode: str,
     delay_min: int,
     delay_max: int,
+    message_expiry_seconds: int,
     cooldown_human: int,
     cooldown_ai: int,
     topic_interval: int,
@@ -304,6 +325,7 @@ def persist_form_state(
         interaction_mode=interaction_mode,
         delay_min=delay_min,
         delay_max=delay_max,
+        message_expiry_seconds=message_expiry_seconds,
         cooldown_human=cooldown_human,
         cooldown_ai=cooldown_ai,
         topic_interval=topic_interval,
@@ -657,7 +679,7 @@ with advanced_section:
                                          help="收到消息后最多等多久再回")
 
         with st.expander("高级回复设置", expanded=False):
-            col1, col2 = st.columns(2)
+            col1, col2, col3 = st.columns(3)
             with col1:
                 cooldown_human = st.number_input(
                     "回复真人的冷却时间（秒）",
@@ -671,6 +693,13 @@ with advanced_section:
                     value=safe_int(env.get("MIN_SECONDS_BETWEEN_REPLIES_CHARACTER"), 5),
                     min_value=0,
                     help="两个AI角色互相回复之间的最短间隔，越小对话越连贯"
+                )
+            with col3:
+                message_expiry_seconds = st.number_input(
+                    "消息过期时间（秒，0=永不过期）",
+                    value=safe_int(env.get("MESSAGE_EXPIRY_SECONDS"), 0),
+                    min_value=0,
+                    help="仅在正常模式下生效；排队中的消息超过这个时间就跳过。填 0 表示永不过期"
                 )
 
         st.subheader("自动发话题")
@@ -698,7 +727,10 @@ with advanced_section:
 
         # 用户自定义话题（保存在 .env 里，用 || 分隔）
         saved_custom = env.get("TOPIC_DIRECTIONS_CUSTOM", "")
-        custom_list = [d for d in saved_custom.split("||") if d.strip()] if saved_custom else []
+        default_custom_list = [d for d in saved_custom.split("||") if d.strip()] if saved_custom else []
+        if "custom_topic_directions" not in st.session_state:
+            st.session_state.custom_topic_directions = default_custom_list
+        custom_list = list(st.session_state.custom_topic_directions)
 
         # 合并预设 + 自定义，构成完整选项列表
         all_options = ALL_DIRECTIONS + custom_list
@@ -712,14 +744,15 @@ with advanced_section:
 
             col1, col2 = st.columns([4, 1])
             with col1:
-                new_direction = st.text_input("添加自定义话题方向", placeholder="如：健身、减肥、运动", label_visibility="visible")
+                new_direction = st.text_input(
+                    "添加自定义话题方向",
+                    key="new_topic_direction",
+                    placeholder="如：健身、减肥、运动",
+                    label_visibility="visible",
+                )
             with col2:
                 st.markdown("<br>", unsafe_allow_html=True)
-                if st.button("添加", use_container_width=True):
-                    if new_direction.strip() and new_direction.strip() not in all_options:
-                        custom_list.append(new_direction.strip())
-                        all_options = ALL_DIRECTIONS + custom_list
-                        st.rerun()
+                st.button("添加", use_container_width=True, on_click=add_custom_topic_direction)
 
             topic_directions = st.multiselect(
                 "话题方向（勾选后 AI 只在这些范围内轮换）",
@@ -771,6 +804,7 @@ with login_section:
                             interaction_mode=interaction_mode,
                             delay_min=delay_min,
                             delay_max=delay_max,
+                            message_expiry_seconds=message_expiry_seconds,
                             cooldown_human=cooldown_human,
                             cooldown_ai=cooldown_ai,
                             topic_interval=topic_interval,
@@ -805,6 +839,7 @@ with login_section:
                             interaction_mode=interaction_mode,
                             delay_min=delay_min,
                             delay_max=delay_max,
+                            message_expiry_seconds=message_expiry_seconds,
                             cooldown_human=cooldown_human,
                             cooldown_ai=cooldown_ai,
                             topic_interval=topic_interval,
@@ -865,7 +900,12 @@ with login_section:
             if st.session_state.get(code_hash_key):
                 st.text_input("验证码", key=code_input_key, placeholder="输入 Telegram 发来的验证码")
                 st.text_input("二步验证密码", key=password_input_key, type="password", placeholder="若未开启可留空")
-                if st.button("完成登录", key=f"finish_login_{char_id}", use_container_width=True):
+                if st.button(
+                    "完成登录",
+                    key=f"finish_login_{char_id}",
+                    use_container_width=True,
+                    disabled=not st.session_state.get(code_input_key, "").strip(),
+                ):
                     try:
                         normalized_chars = persist_form_state(
                             api_id=api_id,
@@ -880,6 +920,7 @@ with login_section:
                             interaction_mode=interaction_mode,
                             delay_min=delay_min,
                             delay_max=delay_max,
+                            message_expiry_seconds=message_expiry_seconds,
                             cooldown_human=cooldown_human,
                             cooldown_ai=cooldown_ai,
                             topic_interval=topic_interval,
@@ -905,6 +946,7 @@ with login_section:
                         )
                         if result["status"] == "password_required":
                             st.session_state[login_state_key] = "该账号已开启二步验证，请输入密码后再试"
+                            st.rerun()
                         else:
                             st.session_state.pop(code_hash_key, None)
                             # 登录成功后自动检查登录状态，获取真实手机号匹配结果
@@ -916,14 +958,17 @@ with login_section:
                                     st.session_state[login_state_key] = status["label"]
                                     st.session_state[login_meta_key] = status
                                     set_app_notice("success", f"{char['name']} 登录成功：{status['label']}")
+                                    st.rerun()
                                     break
                                 except Exception as check_err:
                                     if _attempt == 1:
                                         st.session_state[login_state_key] = f"状态未知：{check_err}"
                                         st.session_state.pop(login_meta_key, None)
                                         set_app_notice("warning", f"无法确认登录结果，请手动点击检查登录状态：{check_err}")
+                                        st.rerun()
                     except Exception as e:
                         st.session_state[login_state_key] = f"登录失败：{e}"
+                        st.rerun()
 with group_section:
     st.header("3. 选择群组")
     st.caption("从已登录账号可见的群组里选择一个，系统会自动填入群组 ID。之后你也可以手动改。")
@@ -946,6 +991,7 @@ with group_section:
                     interaction_mode=interaction_mode,
                     delay_min=delay_min,
                     delay_max=delay_max,
+                    message_expiry_seconds=message_expiry_seconds,
                     cooldown_human=cooldown_human,
                     cooldown_ai=cooldown_ai,
                     topic_interval=topic_interval,
@@ -999,6 +1045,7 @@ with group_section:
                         interaction_mode=interaction_mode,
                         delay_min=delay_min,
                         delay_max=delay_max,
+                        message_expiry_seconds=message_expiry_seconds,
                         cooldown_human=cooldown_human,
                         cooldown_ai=cooldown_ai,
                         topic_interval=topic_interval,
@@ -1047,6 +1094,7 @@ with start_section:
                     interaction_mode=interaction_mode,
                     delay_min=delay_min,
                     delay_max=delay_max,
+                    message_expiry_seconds=message_expiry_seconds,
                     cooldown_human=cooldown_human,
                     cooldown_ai=cooldown_ai,
                     topic_interval=topic_interval,
@@ -1078,6 +1126,7 @@ with start_section:
                         interaction_mode=interaction_mode,
                         delay_min=delay_min,
                         delay_max=delay_max,
+                        message_expiry_seconds=message_expiry_seconds,
                         cooldown_human=cooldown_human,
                         cooldown_ai=cooldown_ai,
                         topic_interval=topic_interval,

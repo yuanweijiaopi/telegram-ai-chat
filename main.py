@@ -14,9 +14,13 @@ from telethon.errors import FloodWaitError
 from characters import BEHAVIOR_POLICY, CHARACTERS, GLOBAL_RULES
 from behavior import (
     build_system_prompt,
+    detect_message_meta,
+    enrich_message_meta,
     is_recent_duplicate_entry,
     merge_policy,
     record_message,
+    should_reply,
+    should_send_after_delay,
 )
 from session_manager import (
     cleanup_orphaned_sessions,
@@ -38,6 +42,7 @@ GROUP_ID = int(os.getenv("TELEGRAM_GROUP_ID"))
 
 REPLY_DELAY_MIN = int(os.getenv("REPLY_DELAY_MIN", 15))
 REPLY_DELAY_MAX = int(os.getenv("REPLY_DELAY_MAX", 60))
+MESSAGE_EXPIRY_SECONDS = int(os.getenv("MESSAGE_EXPIRY_SECONDS", 0))
 
 # 通用 AI 客户端，切换模型只需修改 .env
 ai = AsyncOpenAI(
@@ -403,6 +408,28 @@ def choose_reply_character(candidates: list[dict]) -> dict | None:
     return random.choice(candidates)
 
 
+def choose_reply_characters(candidates: list[dict]) -> list[dict]:
+    if not candidates:
+        return []
+
+    if policy.get("always_reply", False):
+        if REPLY_ASSIGNMENT_STRATEGY == "round_robin":
+            ordered = sorted(candidates, key=lambda item: item["name"])
+            return ordered
+        if REPLY_ASSIGNMENT_STRATEGY == "least_recent":
+            return sorted(
+                candidates,
+                key=lambda item: (
+                    last_reply_at.get(item["name"], 0),
+                    item["name"],
+                ),
+            )
+        return list(candidates)
+
+    character = choose_reply_character(candidates)
+    return [character] if character else []
+
+
 async def reply_coordinator(clients: list[TelegramClient]):
     """
     借鉴 AI Town 单线程协调器：
@@ -421,68 +448,122 @@ async def reply_coordinator(clients: list[TelegramClient]):
 
         # 非重试消息才记录历史；重试时历史已记录，直接跳到发送
         if not is_retry:
-            if not is_recent_duplicate_entry(chat_history, name=sender_name, text=text):
+            duplicate_in_history = is_recent_duplicate_entry(chat_history, name=sender_name, text=text)
+            if not duplicate_in_history:
                 record_message(chat_history, policy, name=sender_name, text=text, source=source)
             else:
-                log_strategy("history_skip_duplicate", sender=sender_name, text=text)
-                continue
+                # 角色消息在发送时已经写入过历史；这里再次收到的是 Telegram 广播回来的事件。
+                # 这类事件仍然要继续进入回复决策，否则角色互聊会在第一轮后被截断。
+                if source != "character":
+                    log_strategy("history_skip_duplicate", sender=sender_name, text=text)
+                    continue
+                log_strategy("history_duplicate_character_kept", sender=sender_name, text=text)
 
-        # 重试时复用原角色，否则随机指定一个（排除发送者）
+        # 重试时复用原角色，否则按当前策略选择一个或多个角色（排除发送者）
         if is_retry and "assigned_character" in item:
-            character = next((c for c in CHARACTERS if c["name"] == item["assigned_character"]), None)
-            if not character:
+            selected_characters = [
+                next((c for c in CHARACTERS if c["name"] == item["assigned_character"]), None)
+            ]
+            selected_characters = [c for c in selected_characters if c]
+            if not selected_characters:
                 continue
         else:
             candidates = [c for c in CHARACTERS if c["name"] != sender_name]
             if not candidates:
                 continue
-            character = choose_reply_character(candidates)
-            if not character:
+            selected_characters = choose_reply_characters(candidates)
+            if not selected_characters:
                 continue
-        client = client_map[character["name"]]
 
-        # 重试不再等待，直接发；首次处理才延迟+过期检查
+        # 重试不再等待，直接发；首次处理才延迟
         if not is_retry:
             delay = random.randint(REPLY_DELAY_MIN, REPLY_DELAY_MAX)
-            log_strategy("reply_scheduled", character=character["name"], delay=delay, trigger=text[:30])
+            log_strategy(
+                "reply_scheduled",
+                characters=[character["name"] for character in selected_characters],
+                delay=delay,
+                trigger=text[:30],
+            )
             await asyncio.sleep(delay)
+            if (
+                INTERACTION_MODE != "character_only"
+                and source == "human"
+                and MESSAGE_EXPIRY_SECONDS > 0
+            ):
+                msg_age = time.time() - item["timestamp"]
+                if msg_age > MESSAGE_EXPIRY_SECONDS:
+                    log_strategy(
+                        "reply_stale_skipped",
+                        characters=[character["name"] for character in selected_characters],
+                        age=int(msg_age),
+                        text=text[:30],
+                    )
+                    print(f"[协调器] 消息已过期（{int(msg_age)}s），跳过: {text[:30]}")
+                    continue
 
-            msg_age = time.time() - item["timestamp"]
-            if msg_age > REPLY_DELAY_MAX * 2:
-                log_strategy("reply_stale_skipped", character=character["name"], age=int(msg_age), text=text[:30])
-                print(f"[{character['name']}] 消息已过期（{int(msg_age)}s），跳过")
+        for character in selected_characters:
+            client = client_map[character["name"]]
+            message_meta = detect_message_meta(
+                text=text,
+                sender_name=sender_name,
+                source=source,
+                character_name=character["name"],
+                aliases=[character["name"], character.get("telegram_name", "")],
+            )
+            message_meta = enrich_message_meta(chat_history, policy, message_meta)
+            ok_to_reply, reason = should_reply(
+                character,
+                chat_history,
+                policy,
+                last_reply_at,
+                message_meta,
+            )
+            if not ok_to_reply:
+                log_strategy("reply_skipped", character=character["name"], reason=reason, text=text[:30])
                 continue
 
-        try:
-            reply = await ai_reply_unique(character, chat_history)
-            if not reply:
-                log_strategy("reply_empty", character=character["name"])
-                print(f"[{character['name']}] 跳过空回复")
-                continue
-
-            await client.send_message(GROUP_ID, reply)
-            record_message(chat_history, policy, name=character["name"], text=reply, source="character")
-            last_reply_at[character["name"]] = time.time()
-            print(f"[{character['name']}] {reply}")
-            log_strategy("reply_sent", character=character["name"], text=reply)
-
-        except FloodWaitError as e:
-            print(f"[{character['name']}] 触发限流，等待 {e.seconds}s")
-            log_strategy("reply_flood_wait", character=character["name"], seconds=e.seconds)
-            await asyncio.sleep(e.seconds)
-            # 标记为重试并重置时间戳，避免重入队后立即过期
             try:
-                _reply_queue.put_nowait({
-                    **item,
-                    "is_retry": True,
-                    "assigned_character": character["name"],
-                    "timestamp": time.time(),
-                })
-            except asyncio.QueueFull:
-                log_strategy("reply_flood_requeue_failed", character=character["name"])
-        except Exception as e:
-            print(f"[{character['name']}] 出错：{e}")
-            log_strategy("reply_error", character=character["name"], error=str(e))
+                still_valid, cancel_reason = should_send_after_delay(
+                    character,
+                    chat_history,
+                    policy,
+                    text,
+                    sender_name,
+                    message_meta,
+                    interaction_mode=INTERACTION_MODE,
+                )
+                if not still_valid:
+                    log_strategy("reply_cancelled_after_delay", character=character["name"], reason=cancel_reason)
+                    continue
+
+                reply = await ai_reply_unique(character, chat_history)
+                if not reply:
+                    log_strategy("reply_empty", character=character["name"])
+                    print(f"[{character['name']}] 跳过空回复")
+                    continue
+
+                await client.send_message(GROUP_ID, reply)
+                record_message(chat_history, policy, name=character["name"], text=reply, source="character")
+                last_reply_at[character["name"]] = time.time()
+                print(f"[{character['name']}] {reply}")
+                log_strategy("reply_sent", character=character["name"], text=reply)
+
+            except FloodWaitError as e:
+                print(f"[{character['name']}] 触发限流，等待 {e.seconds}s")
+                log_strategy("reply_flood_wait", character=character["name"], seconds=e.seconds)
+                await asyncio.sleep(e.seconds)
+                try:
+                    _reply_queue.put_nowait({
+                        **item,
+                        "is_retry": True,
+                        "assigned_character": character["name"],
+                        "timestamp": time.time(),
+                    })
+                except asyncio.QueueFull:
+                    log_strategy("reply_flood_requeue_failed", character=character["name"])
+            except Exception as e:
+                print(f"[{character['name']}] 出错：{e}")
+                log_strategy("reply_error", character=character["name"], error=str(e))
 
 
 async def login_character(character: dict) -> TelegramClient:
@@ -543,13 +624,19 @@ _TOPIC_DIRECTIONS = (
     if _enabled else _all_directions
 )
 _topic_index = 0
+_current_topic_direction = _TOPIC_DIRECTIONS[0] if len(_TOPIC_DIRECTIONS) == 1 else ""
+
+policy["topic_directions"] = list(_TOPIC_DIRECTIONS)
+policy["current_topic_direction"] = _current_topic_direction
 
 
 def _pick_topic_direction() -> str:
-    global _topic_index
+    global _topic_index, _current_topic_direction
     directions = _TOPIC_DIRECTIONS if _TOPIC_DIRECTIONS else _ALL_TOPIC_DIRECTIONS
     direction = directions[_topic_index % len(directions)]
     _topic_index += 1
+    _current_topic_direction = direction
+    policy["current_topic_direction"] = direction
     return direction
 
 
@@ -558,15 +645,25 @@ async def auto_topic(clients: list[TelegramClient]):
     interval = int(os.getenv("TOPIC_INTERVAL", 1800))  # 默认30分钟
     await asyncio.sleep(TOPIC_START_DELAY)  # 启动后先等一会儿
     while True:
+        latest = chat_history[-1] if chat_history else None
+        if latest:
+            idle_seconds = time.time() - latest.get("timestamp", time.time())
+            quiet_window = policy.get("quiet_window_seconds", 180)
+            if idle_seconds < quiet_window:
+                await asyncio.sleep(min(quiet_window - idle_seconds, 15))
+                continue
+
         character = random.choice(CHARACTERS)
         client = clients[CHARACTERS.index(character)]
+        topic_direction = _pick_topic_direction()
 
         msg = await generate_with_retry(
             character=character,
             history=chat_history,
             mode="topic",
             user_content=(
-                f"从以下话题方向中随机选一个（今天选：{_pick_topic_direction()}），"
+                f"这次必须围绕这个话题方向发起或续上：{topic_direction}。"
+                "只聊这个方向，不要拐到别的话题。"
                 "用你的风格自然说出来，像随口一句，不要像提问模板。"
             ),
             max_tokens=120,

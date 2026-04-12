@@ -72,6 +72,19 @@ def build_system_prompt(
     taboo_block = (
         f"尽量回避这些话题或角度：{'、'.join(taboo_topics)}\n" if taboo_topics else ""
     )
+    topic_directions = [d for d in policy.get("topic_directions", []) if d]
+    current_topic_direction = (policy.get("current_topic_direction") or "").strip()
+    topic_scope_block = ""
+    if topic_directions:
+        topic_scope_block = (
+            f"当前允许的话题方向：{'、'.join(topic_directions)}\n"
+            "聊天内容尽量只在这些范围里展开，不要突然切到未选的话题。\n"
+        )
+        if current_topic_direction:
+            topic_scope_block += (
+                f"当前这轮主线话题：{current_topic_direction}\n"
+                "这次输出必须和这条主线直接相关，优先顺着它继续聊。\n"
+            )
     _override = character.get("system_override")
     system_desc = _override if _override is not None and _override.strip() else character.get("system", "")
     return (
@@ -81,6 +94,7 @@ def build_system_prompt(
         f"{extra_rule_block}"
         f"{relationship_block}"
         f"{taboo_block}"
+        f"{topic_scope_block}"
         f"群里其他人：{'、'.join(other_names) if other_names else '暂无'}\n"
         f"最近聊天记录：\n{context or '暂无'}\n\n"
         f"{mode_instructions.get(mode, mode_instructions['reply'])}\n"
@@ -199,13 +213,6 @@ def should_reply(
     if now < cooldown_until:
         return False, "cooldown"
 
-    consecutive_ai_turns = count_recent_ai_turns(history)
-    if not force_reply and consecutive_ai_turns >= policy["max_consecutive_ai_turns"]:
-        return False, "too-many-ai-turns"
-
-    if is_duplicate_risk(character["name"], history, policy["duplicate_window"]):
-        return False, "duplicate-risk"
-
     return True, "ok"
 
 
@@ -295,12 +302,17 @@ def should_send_after_delay(
     pending_text: str,
     pending_sender: str,
     message_meta: dict[str, Any],
+    interaction_mode: str = "mixed",
 ) -> tuple[bool, str]:
     if not history:
         return False, "history-cleared"
 
     latest = history[-1]
     if normalize_text(latest.get("text", "")) != normalize_text(pending_text):
+        if interaction_mode == "mixed" and message_meta.get("source") == "human":
+            return True, "mixed-keep"
+        if latest.get("source") == "human":
+            return False, "newer-human-message"
         if message_meta.get("is_direct_mention"):
             return True, "mention-kept"
         if (
