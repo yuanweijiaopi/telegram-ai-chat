@@ -7,6 +7,8 @@ import asyncio
 import sys
 import uuid
 import json
+import threading
+from datetime import datetime, time as dt_time
 import psutil
 import socks
 from telethon import TelegramClient
@@ -45,6 +47,13 @@ def load_current_env() -> dict:
 
 def set_app_notice(level: str, message: str) -> None:
     st.session_state.app_notice = {"level": level, "message": message}
+
+
+def append_runtime_log(message: str) -> None:
+    log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat.log")
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with open(log_path, "a", encoding="utf-8") as f:
+        f.write(f"[{timestamp}] {message}\n")
 
 
 def add_custom_topic_direction() -> None:
@@ -117,6 +126,81 @@ def stop_bot():
     except Exception:
         pass
     os.remove(PID_FILE)
+
+
+def parse_hhmm(value: str | None, default: str) -> dt_time:
+    raw = (value or default).strip()
+    try:
+        hour_str, minute_str = raw.split(":", 1)
+        return dt_time(hour=int(hour_str), minute=int(minute_str))
+    except Exception:
+        hour_str, minute_str = default.split(":", 1)
+        return dt_time(hour=int(hour_str), minute=int(minute_str))
+
+
+def normalize_time_value(value) -> str:
+    if hasattr(value, "hour") and hasattr(value, "minute"):
+        return f"{value.hour:02d}:{value.minute:02d}"
+    return str(value or "").strip()
+
+
+def should_scheduler_keep_running(current_env: dict) -> bool:
+    if current_env.get("AUTO_SCHEDULE_ENABLED", "false") != "true":
+        return is_running()
+
+    now = datetime.now()
+    if current_env.get("AUTO_SCHEDULE_WEEKDAYS_ONLY", "false") == "true" and now.weekday() >= 5:
+        return False
+
+    start_value = parse_hhmm(current_env.get("AUTO_SCHEDULE_START"), "09:00")
+    stop_value = parse_hhmm(current_env.get("AUTO_SCHEDULE_STOP"), "23:00")
+    start_minutes = start_value.hour * 60 + start_value.minute
+    stop_minutes = stop_value.hour * 60 + stop_value.minute
+    now_minutes = now.hour * 60 + now.minute
+
+    if start_minutes == stop_minutes:
+        return False
+    if start_minutes < stop_minutes:
+        return start_minutes <= now_minutes < stop_minutes
+    return now_minutes >= start_minutes or now_minutes < stop_minutes
+
+
+def scheduler_loop() -> None:
+    last_action = None
+    while True:
+        try:
+            current_env = load_current_env()
+            schedule_enabled = current_env.get("AUTO_SCHEDULE_ENABLED", "false") == "true"
+            if schedule_enabled:
+                should_run = should_scheduler_keep_running(current_env)
+                running = is_running()
+                if should_run and not running:
+                    start_bot()
+                    append_runtime_log("[定时任务] 到达开启时间，已自动启动机器人")
+                    last_action = "started"
+                elif not should_run and running:
+                    stop_bot()
+                    append_runtime_log("[定时任务] 到达关闭时间，已自动停止机器人")
+                    last_action = "stopped"
+                else:
+                    last_action = None
+            else:
+                last_action = None
+        except Exception as exc:
+            if last_action != f"error:{exc}":
+                append_runtime_log(f"[定时任务] 调度器异常：{exc}")
+                last_action = f"error:{exc}"
+        time.sleep(20)
+
+
+@st.cache_resource
+def ensure_scheduler_started():
+    thread = threading.Thread(target=scheduler_loop, daemon=True, name="bot-scheduler")
+    thread.start()
+    return True
+
+
+ensure_scheduler_started()
 
 
 def session_file_for_character(name: str) -> str:
@@ -244,6 +328,11 @@ INTERACTION_MODE_OPTIONS = {
     "character_only": "只让角色互聊，不理会真人",
 }
 
+REPLY_DELAY_MODE_OPTIONS = {
+    "batch_pause": "整段回复前统一等待",
+    "per_message": "每条发出前单独等待",
+}
+
 
 def build_form_data(
     *,
@@ -257,8 +346,13 @@ def build_form_data(
     always_reply: bool,
     reply_assignment_strategy: str,
     interaction_mode: str,
+    reply_delay_mode: str | None = None,
     delay_min: int,
     delay_max: int,
+    auto_schedule_enabled: bool | None = None,
+    auto_schedule_start: str | None = None,
+    auto_schedule_stop: str | None = None,
+    auto_schedule_weekdays_only: bool | None = None,
     message_expiry_seconds: int,
     cooldown_human: int,
     cooldown_ai: int,
@@ -272,6 +366,19 @@ def build_form_data(
 ) -> tuple[dict, list[dict]]:
     normalized_characters = ensure_character_ids(characters)
     current_env = load_current_env()
+    resolved_reply_delay_mode = reply_delay_mode or current_env.get("REPLY_DELAY_MODE", "batch_pause")
+    resolved_auto_schedule_enabled = (
+        "true" if auto_schedule_enabled is True else
+        "false" if auto_schedule_enabled is False else
+        current_env.get("AUTO_SCHEDULE_ENABLED", "false")
+    )
+    resolved_auto_schedule_start = auto_schedule_start or current_env.get("AUTO_SCHEDULE_START", "09:00")
+    resolved_auto_schedule_stop = auto_schedule_stop or current_env.get("AUTO_SCHEDULE_STOP", "23:00")
+    resolved_auto_schedule_weekdays_only = (
+        "true" if auto_schedule_weekdays_only is True else
+        "false" if auto_schedule_weekdays_only is False else
+        current_env.get("AUTO_SCHEDULE_WEEKDAYS_ONLY", "false")
+    )
     data = {
         **current_env,
         "TELEGRAM_API_ID": api_id,
@@ -284,8 +391,13 @@ def build_form_data(
         "ALWAYS_REPLY": "true" if always_reply else "false",
         "REPLY_ASSIGNMENT_STRATEGY": reply_assignment_strategy,
         "INTERACTION_MODE": interaction_mode,
+        "REPLY_DELAY_MODE": resolved_reply_delay_mode,
         "REPLY_DELAY_MIN": str(delay_min),
         "REPLY_DELAY_MAX": str(delay_max),
+        "AUTO_SCHEDULE_ENABLED": resolved_auto_schedule_enabled,
+        "AUTO_SCHEDULE_START": resolved_auto_schedule_start,
+        "AUTO_SCHEDULE_STOP": resolved_auto_schedule_stop,
+        "AUTO_SCHEDULE_WEEKDAYS_ONLY": resolved_auto_schedule_weekdays_only,
         "MESSAGE_EXPIRY_SECONDS": str(message_expiry_seconds),
         "MIN_SECONDS_BETWEEN_REPLIES_HUMAN": str(cooldown_human),
         "MIN_SECONDS_BETWEEN_REPLIES_CHARACTER": str(cooldown_ai),
@@ -315,8 +427,13 @@ def persist_form_state(
     always_reply: bool,
     reply_assignment_strategy: str,
     interaction_mode: str,
+    reply_delay_mode: str | None = None,
     delay_min: int,
     delay_max: int,
+    auto_schedule_enabled: bool | None = None,
+    auto_schedule_start: str | None = None,
+    auto_schedule_stop: str | None = None,
+    auto_schedule_weekdays_only: bool | None = None,
     message_expiry_seconds: int,
     cooldown_human: int,
     cooldown_ai: int,
@@ -339,8 +456,13 @@ def persist_form_state(
         always_reply=always_reply,
         reply_assignment_strategy=reply_assignment_strategy,
         interaction_mode=interaction_mode,
+        reply_delay_mode=reply_delay_mode,
         delay_min=delay_min,
         delay_max=delay_max,
+        auto_schedule_enabled=auto_schedule_enabled,
+        auto_schedule_start=auto_schedule_start,
+        auto_schedule_stop=auto_schedule_stop,
+        auto_schedule_weekdays_only=auto_schedule_weekdays_only,
         message_expiry_seconds=message_expiry_seconds,
         cooldown_human=cooldown_human,
         cooldown_ai=cooldown_ai,
@@ -686,6 +808,17 @@ with advanced_section:
             help="正常模式会响应真人消息；只让角色互聊模式会忽略真人消息，只保留角色之间的接话和自动话题。"
         )
 
+        saved_reply_delay_mode = env.get("REPLY_DELAY_MODE", "batch_pause")
+        if saved_reply_delay_mode not in REPLY_DELAY_MODE_OPTIONS:
+            saved_reply_delay_mode = "batch_pause"
+        reply_delay_mode = st.selectbox(
+            "回复延迟模式",
+            options=list(REPLY_DELAY_MODE_OPTIONS.keys()),
+            index=list(REPLY_DELAY_MODE_OPTIONS.keys()).index(saved_reply_delay_mode),
+            format_func=lambda key: REPLY_DELAY_MODE_OPTIONS[key],
+            help="整段回复前统一等待：一条消息触发后先等一次，后面几个角色可能会连续发。每条发出前单独等待：每个角色真正发送前都会各自再等一遍，更像聊一段歇一会。"
+        )
+
         col1, col2 = st.columns(2)
         with col1:
             delay_min = st.number_input("回复最短延迟（秒）", value=safe_int(env.get("REPLY_DELAY_MIN"), 5), min_value=0,
@@ -717,6 +850,35 @@ with advanced_section:
                     min_value=0,
                     help="仅在正常模式下生效；排队中的消息超过这个时间就跳过。填 0 表示永不过期"
                 )
+
+        st.subheader("定时开关机")
+        auto_schedule_enabled = st.toggle(
+            "启用定时开关机",
+            value=env.get("AUTO_SCHEDULE_ENABLED", "false") == "true",
+            help="按下面设置的时间自动启动或停止机器人。使用服务器当前本地时间。"
+        )
+        col1, col2 = st.columns(2)
+        with col1:
+            auto_schedule_start = st.time_input(
+                "每天自动开启时间",
+                value=parse_hhmm(env.get("AUTO_SCHEDULE_START"), "09:00"),
+                help="到这个时间会自动执行启动机器人。"
+            )
+        with col2:
+            auto_schedule_stop = st.time_input(
+                "每天自动关闭时间",
+                value=parse_hhmm(env.get("AUTO_SCHEDULE_STOP"), "23:00"),
+                help="到这个时间会自动执行停止机器人。"
+            )
+        auto_schedule_weekdays_only = st.checkbox(
+            "仅工作日生效",
+            value=env.get("AUTO_SCHEDULE_WEEKDAYS_ONLY", "false") == "true",
+            help="勾选后只在周一到周五生效，周末不自动启动。"
+        )
+        st.caption(
+            "整段回复前统一等待：一条消息触发后先等一次，后面几个角色可能连续发。"
+            "每条发出前单独等待：每个角色真正发送前都会各自再等一遍，更像聊一段歇一会。"
+        )
 
         st.subheader("自动发话题")
         topic_interval = st.number_input(
@@ -824,6 +986,11 @@ with login_section:
                             always_reply=always_reply,
                             reply_assignment_strategy=reply_assignment_strategy,
                             interaction_mode=interaction_mode,
+                            reply_delay_mode=reply_delay_mode,
+                            auto_schedule_enabled=auto_schedule_enabled,
+                            auto_schedule_start=normalize_time_value(auto_schedule_start),
+                            auto_schedule_stop=normalize_time_value(auto_schedule_stop),
+                            auto_schedule_weekdays_only=auto_schedule_weekdays_only,
                             delay_min=delay_min,
                             delay_max=delay_max,
                             message_expiry_seconds=message_expiry_seconds,
@@ -859,6 +1026,11 @@ with login_section:
                             always_reply=always_reply,
                             reply_assignment_strategy=reply_assignment_strategy,
                             interaction_mode=interaction_mode,
+                            reply_delay_mode=reply_delay_mode,
+                            auto_schedule_enabled=auto_schedule_enabled,
+                            auto_schedule_start=normalize_time_value(auto_schedule_start),
+                            auto_schedule_stop=normalize_time_value(auto_schedule_stop),
+                            auto_schedule_weekdays_only=auto_schedule_weekdays_only,
                             delay_min=delay_min,
                             delay_max=delay_max,
                             message_expiry_seconds=message_expiry_seconds,
@@ -940,6 +1112,11 @@ with login_section:
                             always_reply=always_reply,
                             reply_assignment_strategy=reply_assignment_strategy,
                             interaction_mode=interaction_mode,
+                            reply_delay_mode=reply_delay_mode,
+                            auto_schedule_enabled=auto_schedule_enabled,
+                            auto_schedule_start=normalize_time_value(auto_schedule_start),
+                            auto_schedule_stop=normalize_time_value(auto_schedule_stop),
+                            auto_schedule_weekdays_only=auto_schedule_weekdays_only,
                             delay_min=delay_min,
                             delay_max=delay_max,
                             message_expiry_seconds=message_expiry_seconds,
@@ -1011,6 +1188,11 @@ with group_section:
                     always_reply=always_reply,
                     reply_assignment_strategy=reply_assignment_strategy,
                     interaction_mode=interaction_mode,
+                    reply_delay_mode=reply_delay_mode,
+                    auto_schedule_enabled=auto_schedule_enabled,
+                    auto_schedule_start=normalize_time_value(auto_schedule_start),
+                    auto_schedule_stop=normalize_time_value(auto_schedule_stop),
+                    auto_schedule_weekdays_only=auto_schedule_weekdays_only,
                     delay_min=delay_min,
                     delay_max=delay_max,
                     message_expiry_seconds=message_expiry_seconds,
@@ -1065,6 +1247,11 @@ with group_section:
                         always_reply=always_reply,
                         reply_assignment_strategy=reply_assignment_strategy,
                         interaction_mode=interaction_mode,
+                        reply_delay_mode=reply_delay_mode,
+                        auto_schedule_enabled=auto_schedule_enabled,
+                        auto_schedule_start=normalize_time_value(auto_schedule_start),
+                        auto_schedule_stop=normalize_time_value(auto_schedule_stop),
+                        auto_schedule_weekdays_only=auto_schedule_weekdays_only,
                         delay_min=delay_min,
                         delay_max=delay_max,
                         message_expiry_seconds=message_expiry_seconds,
@@ -1114,6 +1301,11 @@ with start_section:
                     always_reply=always_reply,
                     reply_assignment_strategy=reply_assignment_strategy,
                     interaction_mode=interaction_mode,
+                    reply_delay_mode=reply_delay_mode,
+                    auto_schedule_enabled=auto_schedule_enabled,
+                    auto_schedule_start=normalize_time_value(auto_schedule_start),
+                    auto_schedule_stop=normalize_time_value(auto_schedule_stop),
+                    auto_schedule_weekdays_only=auto_schedule_weekdays_only,
                     delay_min=delay_min,
                     delay_max=delay_max,
                     message_expiry_seconds=message_expiry_seconds,
@@ -1146,6 +1338,11 @@ with start_section:
                         always_reply=always_reply,
                         reply_assignment_strategy=reply_assignment_strategy,
                         interaction_mode=interaction_mode,
+                        reply_delay_mode=reply_delay_mode,
+                        auto_schedule_enabled=auto_schedule_enabled,
+                        auto_schedule_start=normalize_time_value(auto_schedule_start),
+                        auto_schedule_stop=normalize_time_value(auto_schedule_stop),
+                        auto_schedule_weekdays_only=auto_schedule_weekdays_only,
                         delay_min=delay_min,
                         delay_max=delay_max,
                         message_expiry_seconds=message_expiry_seconds,

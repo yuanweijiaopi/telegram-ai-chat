@@ -42,6 +42,7 @@ GROUP_ID = int(os.getenv("TELEGRAM_GROUP_ID"))
 
 REPLY_DELAY_MIN = int(os.getenv("REPLY_DELAY_MIN", 15))
 REPLY_DELAY_MAX = int(os.getenv("REPLY_DELAY_MAX", 60))
+REPLY_DELAY_MODE = os.getenv("REPLY_DELAY_MODE", "batch_pause").strip().lower()
 MESSAGE_EXPIRY_SECONDS = int(os.getenv("MESSAGE_EXPIRY_SECONDS", 0))
 
 # 通用 AI 客户端，切换模型只需修改 .env
@@ -476,12 +477,13 @@ async def reply_coordinator(clients: list[TelegramClient]):
                 continue
 
         # 重试不再等待，直接发；首次处理才延迟
-        if not is_retry:
+        if not is_retry and REPLY_DELAY_MODE != "per_message":
             delay = random.randint(REPLY_DELAY_MIN, REPLY_DELAY_MAX)
             log_strategy(
                 "reply_scheduled",
                 characters=[character["name"] for character in selected_characters],
                 delay=delay,
+                mode=REPLY_DELAY_MODE,
                 trigger=text[:30],
             )
             await asyncio.sleep(delay)
@@ -523,6 +525,32 @@ async def reply_coordinator(clients: list[TelegramClient]):
                 continue
 
             try:
+                if not is_retry and REPLY_DELAY_MODE == "per_message":
+                    delay = random.randint(REPLY_DELAY_MIN, REPLY_DELAY_MAX)
+                    log_strategy(
+                        "reply_scheduled",
+                        characters=[character["name"]],
+                        delay=delay,
+                        mode=REPLY_DELAY_MODE,
+                        trigger=text[:30],
+                    )
+                    await asyncio.sleep(delay)
+                    if (
+                        INTERACTION_MODE != "character_only"
+                        and source == "human"
+                        and MESSAGE_EXPIRY_SECONDS > 0
+                    ):
+                        msg_age = time.time() - item["timestamp"]
+                        if msg_age > MESSAGE_EXPIRY_SECONDS:
+                            log_strategy(
+                                "reply_stale_skipped",
+                                characters=[character["name"]],
+                                age=int(msg_age),
+                                text=text[:30],
+                            )
+                            print(f"[协调器] 消息已过期（{int(msg_age)}s），跳过: {text[:30]}")
+                            continue
+
                 still_valid, cancel_reason = should_send_after_delay(
                     character,
                     chat_history,
