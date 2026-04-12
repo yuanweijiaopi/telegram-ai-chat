@@ -53,10 +53,26 @@ def add_custom_topic_direction() -> None:
         return
 
     existing = st.session_state.get("custom_topic_directions", [])
-    if new_direction in existing:
-        return
+    selected = st.session_state.get("topic_directions_selected", [])
+    changed = False
 
-    st.session_state.custom_topic_directions = existing + [new_direction]
+    if new_direction not in existing:
+        existing = existing + [new_direction]
+        st.session_state.custom_topic_directions = existing
+        changed = True
+
+    if new_direction not in selected:
+        st.session_state.topic_directions_selected = selected + [new_direction]
+        changed = True
+
+    if changed:
+        current_env = load_current_env()
+        current_custom = st.session_state.get("custom_topic_directions", [])
+        current_enabled = st.session_state.get("topic_directions_selected", [])
+        current_env["TOPIC_DIRECTIONS_CUSTOM"] = "||".join(current_custom)
+        current_env["TOPIC_DIRECTIONS_ENABLED"] = "||".join(current_enabled)
+        save_env(current_env)
+        set_app_notice("success", f"已添加话题：{new_direction}")
     st.session_state.pending_new_topic_direction = ""
 
 
@@ -734,6 +750,12 @@ with advanced_section:
 
         # 合并预设 + 自定义，构成完整选项列表
         all_options = ALL_DIRECTIONS + custom_list
+        if "topic_directions_selected" not in st.session_state:
+            st.session_state.topic_directions_selected = [d for d in saved_list if d in all_options]
+        else:
+            st.session_state.topic_directions_selected = [
+                d for d in st.session_state.topic_directions_selected if d in all_options
+            ]
 
         with st.expander("高级话题设置", expanded=False):
             topic_start = st.number_input(
@@ -757,7 +779,7 @@ with advanced_section:
             topic_directions = st.multiselect(
                 "话题方向（勾选后 AI 只在这些范围内轮换）",
                 options=all_options,
-                default=[d for d in saved_list if d in all_options],
+                key="topic_directions_selected",
                 help="至少选一个，不选则使用全部"
             )
 
