@@ -1,6 +1,7 @@
 .env
 .deploy.env
 sessions/
+.venv/
 __pycache__/
 *.pyc
 strategy.log
