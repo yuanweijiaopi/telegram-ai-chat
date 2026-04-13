@@ -17,6 +17,7 @@ from dotenv import dotenv_values
 
 ENV_FILE = ".env"
 PID_FILE = ".bot.pid"
+PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 st.set_page_config(page_title="Telegram AI 群聊配置", layout="centered")
 st.title("Telegram AI 群聊配置")
@@ -93,40 +94,110 @@ def safe_int(value, default: int) -> int:
         return default
 
 
-def is_running():
+def _read_pid_file() -> int | None:
     if not os.path.exists(PID_FILE):
-        return False
+        return None
     try:
-        pid = int(open(PID_FILE).read().strip())
-        return psutil.pid_exists(pid)
+        return int(open(PID_FILE).read().strip())
     except Exception:
+        return None
+
+
+def _write_pid_file(pid: int) -> None:
+    with open(PID_FILE, "w") as f:
+        f.write(str(pid))
+
+
+def _remove_pid_file() -> None:
+    if os.path.exists(PID_FILE):
+        os.remove(PID_FILE)
+
+
+def _is_project_bot_process(proc: psutil.Process) -> bool:
+    try:
+        if proc.pid == os.getpid():
+            return False
+        cmdline = proc.info.get("cmdline") if hasattr(proc, "info") else proc.cmdline()
+        cwd = proc.info.get("cwd") if hasattr(proc, "info") else proc.cwd()
+        cmdline = cmdline or []
+        if not cmdline:
+            return False
+        if os.path.abspath(cwd or "") == PROJECT_DIR and any(part.endswith("main.py") or part == "main.py" for part in cmdline):
+            return True
+        main_path = os.path.join(PROJECT_DIR, "main.py")
+        return any(os.path.abspath(part) == main_path for part in cmdline if part)
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
         return False
+
+
+def _find_bot_processes() -> list[psutil.Process]:
+    processes = []
+    for proc in psutil.process_iter(["pid", "cmdline", "cwd"]):
+        if _is_project_bot_process(proc):
+            processes.append(proc)
+    return processes
+
+
+def is_running():
+    pid = _read_pid_file()
+    if pid is not None:
+        try:
+            proc = psutil.Process(pid)
+            if _is_project_bot_process(proc):
+                return True
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            pass
+
+    bot_processes = _find_bot_processes()
+    if bot_processes:
+        _write_pid_file(bot_processes[0].pid)
+        return True
+
+    _remove_pid_file()
+    return False
 
 
 def start_bot():
+    if is_running():
+        return
     log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat.log")
     proc = subprocess.Popen(
         [sys.executable, "-u", "main.py"],  # 使用当前解释器，避免 venv 漂移
         stdout=open(log_path, "a", encoding="utf-8"),
         stderr=subprocess.STDOUT,
-        cwd=os.path.dirname(os.path.abspath(__file__)),
+        cwd=PROJECT_DIR,
     )
-    with open(PID_FILE, "w") as f:
-        f.write(str(proc.pid))
+    _write_pid_file(proc.pid)
 
 
 def stop_bot():
-    if not os.path.exists(PID_FILE):
-        return
-    try:
-        pid = int(open(PID_FILE).read().strip())
-        parent = psutil.Process(pid)
-        for child in parent.children(recursive=True):
-            child.kill()
-        parent.kill()
-    except Exception:
-        pass
-    os.remove(PID_FILE)
+    seen_pids = set()
+    targets: list[psutil.Process] = []
+
+    pid = _read_pid_file()
+    if pid is not None:
+        try:
+            proc = psutil.Process(pid)
+            if _is_project_bot_process(proc):
+                targets.append(proc)
+                seen_pids.add(proc.pid)
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            pass
+
+    for proc in _find_bot_processes():
+        if proc.pid not in seen_pids:
+            targets.append(proc)
+            seen_pids.add(proc.pid)
+
+    for parent in targets:
+        try:
+            for child in parent.children(recursive=True):
+                child.kill()
+            parent.kill()
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            pass
+
+    _remove_pid_file()
 
 
 def parse_hhmm(value: str | None, default: str) -> dt_time:
