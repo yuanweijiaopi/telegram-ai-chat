@@ -142,11 +142,48 @@ def log_strategy(event_type: str, **payload):
     strategy_logger.info(json.dumps(entry, ensure_ascii=False))
 
 
-def _is_too_similar_to_recent(reply: str, history: list, threshold: float = 0.6, window: int = 5) -> bool:
+def _normalize_similarity_text(text: str) -> str:
+    normalized = re.sub(r"\s+", "", (text or "").strip().lower())
+    normalized = re.sub(r"[“”\"'，。！？、,.!?：:；;（）()【】\[\]…-]+", "", normalized)
+    return normalized
+
+
+def _template_signature(text: str) -> str:
+    normalized = _normalize_similarity_text(text)
+    if not normalized:
+        return ""
+
+    common_markers = ["把", "改成", "现在", "还得", "先"]
+    if all(marker in normalized for marker in common_markers):
+        return "template:" + "|".join(common_markers)
+
+    if "现在" in normalized and "还得" in normalized and "先" in normalized:
+        return "template:现在|还得|先"
+
+    return ""
+
+
+def _is_too_similar_to_recent(reply: str, history: list, threshold: float = 0.6, window: int = 8) -> bool:
+    normalized_reply = _normalize_similarity_text(reply)
+    if not normalized_reply:
+        return True
+
+    reply_signature = _template_signature(reply)
+
     for item in history[-window:]:
-        ratio = SequenceMatcher(None, reply, item.get("text", "")).ratio()
+        recent_text = item.get("text", "")
+        normalized_recent = _normalize_similarity_text(recent_text)
+        if not normalized_recent:
+            continue
+
+        ratio = SequenceMatcher(None, normalized_reply, normalized_recent).ratio()
         if ratio > threshold:
             return True
+
+        # 防止“只换几个名词，但句式完全一样”的模板复读
+        if reply_signature and reply_signature == _template_signature(recent_text):
+            if normalized_reply[:6] == normalized_recent[:6]:
+                return True
     return False
 
 
@@ -655,55 +692,65 @@ async def auto_topic(clients: list[TelegramClient]):
     interval = int(os.getenv("TOPIC_INTERVAL", 1800))  # 默认30分钟
     await asyncio.sleep(TOPIC_START_DELAY)  # 启动后先等一会儿
     while True:
-        latest = chat_history[-1] if chat_history else None
-        if latest:
-            idle_seconds = time.time() - latest.get("timestamp", time.time())
-            quiet_window = policy.get("quiet_window_seconds", 180)
-            if idle_seconds < quiet_window:
-                await asyncio.sleep(min(quiet_window - idle_seconds, 15))
+        try:
+            latest = chat_history[-1] if chat_history else None
+            if latest:
+                idle_seconds = time.time() - latest.get("timestamp", time.time())
+                quiet_window = policy.get("quiet_window_seconds", 180)
+                if idle_seconds < quiet_window:
+                    await asyncio.sleep(min(quiet_window - idle_seconds, 15))
+                    continue
+
+            character = random.choice(CHARACTERS)
+            client = clients[CHARACTERS.index(character)]
+            topic_direction = _pick_topic_direction()
+
+            msg = await generate_with_retry(
+                character=character,
+                history=chat_history,
+                mode="topic",
+                user_content=(
+                    f"这次必须围绕这个话题方向发起或续上：{topic_direction}。"
+                    "只聊这个方向，不要拐到别的话题。"
+                    "用你的风格自然说出来，像随口一句，不要像提问模板。"
+                ),
+                max_tokens=120,
+            )
+            msg = strip_character_prefix(msg, character)
+            if not msg:
+                log_strategy("topic_skipped", character=character["name"], topic_seed="ai_generated")
+                print(
+                    f"[{character['name']}] 发题为空，"
+                    f"{TOPIC_RETRY_DELAY_ON_EMPTY}s 后重试"
+                )
+                await asyncio.sleep(TOPIC_RETRY_DELAY_ON_EMPTY)
                 continue
 
-        character = random.choice(CHARACTERS)
-        client = clients[CHARACTERS.index(character)]
-        topic_direction = _pick_topic_direction()
-
-        msg = await generate_with_retry(
-            character=character,
-            history=chat_history,
-            mode="topic",
-            user_content=(
-                f"这次必须围绕这个话题方向发起或续上：{topic_direction}。"
-                "只聊这个方向，不要拐到别的话题。"
-                "用你的风格自然说出来，像随口一句，不要像提问模板。"
-            ),
-            max_tokens=120,
-        )
-        msg = strip_character_prefix(msg, character)
-        if not msg:
-            log_strategy("topic_skipped", character=character["name"], topic_seed="ai_generated")
-            print(
-                f"[{character['name']}] 发题为空，"
-                f"{TOPIC_RETRY_DELAY_ON_EMPTY}s 后重试"
+            await client.send_message(GROUP_ID, msg)
+            record_message(
+                chat_history,
+                policy,
+                name=character["name"],
+                text=msg,
+                source="character",
+            )
+            last_reply_at[character["name"]] = time.time()
+            print(f"[{character['name']}] 发起话题: {msg}")
+            log_strategy(
+                "topic_sent",
+                character=character["name"],
+                topic_seed="ai_generated",
+                text=msg,
+            )
+            await asyncio.sleep(interval)
+        except Exception as e:
+            print(f"[自动话题] {character['name'] if 'character' in locals() else '未知角色'} 发题失败：{e}")
+            log_strategy(
+                "topic_error",
+                character=character["name"] if "character" in locals() else "unknown",
+                error=str(e),
             )
             await asyncio.sleep(TOPIC_RETRY_DELAY_ON_EMPTY)
-            continue
-        await client.send_message(GROUP_ID, msg)
-        record_message(
-            chat_history,
-            policy,
-            name=character["name"],
-            text=msg,
-            source="character",
-        )
-        last_reply_at[character["name"]] = time.time()
-        print(f"[{character['name']}] 发起话题: {msg}")
-        log_strategy(
-            "topic_sent",
-            character=character["name"],
-            topic_seed="ai_generated",
-            text=msg,
-        )
-        await asyncio.sleep(interval)
 
 
 async def main():
