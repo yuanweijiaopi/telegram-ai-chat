@@ -386,6 +386,19 @@ def make_handler(client: TelegramClient, character: dict, me_id: int):
     return handler
 
 
+def _least_recent_key(item: dict) -> tuple[float, str]:
+    return (last_reply_at.get(item["name"], 0), item["name"])
+
+
+def order_candidates_by_strategy(candidates: list[dict]) -> list[dict]:
+    """按当前策略对候选角色排序；列表顺序即"优先发言"顺序。"""
+    if REPLY_ASSIGNMENT_STRATEGY == "round_robin":
+        return sorted(candidates, key=lambda item: item["name"])
+    if REPLY_ASSIGNMENT_STRATEGY == "least_recent":
+        return sorted(candidates, key=_least_recent_key)
+    return list(candidates)
+
+
 def choose_reply_character(candidates: list[dict]) -> dict | None:
     global _reply_cycle_index
     if not candidates:
@@ -398,13 +411,7 @@ def choose_reply_character(candidates: list[dict]) -> dict | None:
         return character
 
     if REPLY_ASSIGNMENT_STRATEGY == "least_recent":
-        return min(
-            candidates,
-            key=lambda item: (
-                last_reply_at.get(item["name"], 0),
-                item["name"],
-            ),
-        )
+        return min(candidates, key=_least_recent_key)
 
     return random.choice(candidates)
 
@@ -414,21 +421,45 @@ def choose_reply_characters(candidates: list[dict]) -> list[dict]:
         return []
 
     if policy.get("always_reply", False):
-        if REPLY_ASSIGNMENT_STRATEGY == "round_robin":
-            ordered = sorted(candidates, key=lambda item: item["name"])
-            return ordered
-        if REPLY_ASSIGNMENT_STRATEGY == "least_recent":
-            return sorted(
-                candidates,
-                key=lambda item: (
-                    last_reply_at.get(item["name"], 0),
-                    item["name"],
-                ),
-            )
-        return list(candidates)
+        return order_candidates_by_strategy(candidates)
 
     character = choose_reply_character(candidates)
     return [character] if character else []
+
+
+def _is_message_expired(item: dict, source: str) -> tuple[bool, int]:
+    """正常模式下，超过过期阈值的真人消息直接丢弃。返回 (是否过期, 当前消息已等候秒数)。"""
+    msg_age = int(time.time() - item["timestamp"])
+    if INTERACTION_MODE == "character_only":
+        return False, msg_age
+    if source != "human" or MESSAGE_EXPIRY_SECONDS <= 0:
+        return False, msg_age
+    return msg_age > MESSAGE_EXPIRY_SECONDS, msg_age
+
+
+async def _await_reply_delay(item: dict, source: str, text: str, character_names: list[str]) -> bool:
+    """随机等待一段后再次检查消息是否已过期；仍可继续返回 True。"""
+    delay = random.randint(REPLY_DELAY_MIN, REPLY_DELAY_MAX)
+    log_strategy(
+        "reply_scheduled",
+        characters=character_names,
+        delay=delay,
+        mode=REPLY_DELAY_MODE,
+        trigger=text[:30],
+    )
+    await asyncio.sleep(delay)
+
+    expired, msg_age = _is_message_expired(item, source)
+    if expired:
+        log_strategy(
+            "reply_stale_skipped",
+            characters=character_names,
+            age=msg_age,
+            text=text[:30],
+        )
+        print(f"[协调器] 消息已过期（{msg_age}s），跳过: {text[:30]}")
+        return False
+    return True
 
 
 async def reply_coordinator(clients: list[TelegramClient]):
@@ -449,59 +480,31 @@ async def reply_coordinator(clients: list[TelegramClient]):
 
         # 非重试消息才记录历史；重试时历史已记录，直接跳到发送
         if not is_retry:
-            duplicate_in_history = is_recent_duplicate_entry(chat_history, name=sender_name, text=text)
-            if not duplicate_in_history:
-                record_message(chat_history, policy, name=sender_name, text=text, source=source)
-            else:
+            if is_recent_duplicate_entry(chat_history, name=sender_name, text=text):
                 # 角色消息在发送时已经写入过历史；这里再次收到的是 Telegram 广播回来的事件。
                 # 这类事件仍然要继续进入回复决策，否则角色互聊会在第一轮后被截断。
                 if source != "character":
                     log_strategy("history_skip_duplicate", sender=sender_name, text=text)
                     continue
                 log_strategy("history_duplicate_character_kept", sender=sender_name, text=text)
+            else:
+                record_message(chat_history, policy, name=sender_name, text=text, source=source)
 
         # 重试时复用原角色，否则按当前策略选择一个或多个角色（排除发送者）
         if is_retry and "assigned_character" in item:
-            selected_characters = [
-                next((c for c in CHARACTERS if c["name"] == item["assigned_character"]), None)
-            ]
-            selected_characters = [c for c in selected_characters if c]
-            if not selected_characters:
-                continue
+            assigned = next((c for c in CHARACTERS if c["name"] == item["assigned_character"]), None)
+            selected_characters = [assigned] if assigned else []
         else:
             candidates = [c for c in CHARACTERS if c["name"] != sender_name]
-            if not candidates:
-                continue
-            selected_characters = choose_reply_characters(candidates)
-            if not selected_characters:
-                continue
+            selected_characters = choose_reply_characters(candidates) if candidates else []
+        if not selected_characters:
+            continue
 
-        # 重试不再等待，直接发；首次处理才延迟
+        # batch_pause：先整段等待一次，后面几个角色按序连发
         if not is_retry and REPLY_DELAY_MODE != "per_message":
-            delay = random.randint(REPLY_DELAY_MIN, REPLY_DELAY_MAX)
-            log_strategy(
-                "reply_scheduled",
-                characters=[character["name"] for character in selected_characters],
-                delay=delay,
-                mode=REPLY_DELAY_MODE,
-                trigger=text[:30],
-            )
-            await asyncio.sleep(delay)
-            if (
-                INTERACTION_MODE != "character_only"
-                and source == "human"
-                and MESSAGE_EXPIRY_SECONDS > 0
-            ):
-                msg_age = time.time() - item["timestamp"]
-                if msg_age > MESSAGE_EXPIRY_SECONDS:
-                    log_strategy(
-                        "reply_stale_skipped",
-                        characters=[character["name"] for character in selected_characters],
-                        age=int(msg_age),
-                        text=text[:30],
-                    )
-                    print(f"[协调器] 消息已过期（{int(msg_age)}s），跳过: {text[:30]}")
-                    continue
+            character_names = [c["name"] for c in selected_characters]
+            if not await _await_reply_delay(item, source, text, character_names):
+                continue
 
         for character in selected_characters:
             client = client_map[character["name"]]
@@ -525,31 +528,10 @@ async def reply_coordinator(clients: list[TelegramClient]):
                 continue
 
             try:
+                # per_message：每个角色发出前各等一次，更像聊一段歇一会
                 if not is_retry and REPLY_DELAY_MODE == "per_message":
-                    delay = random.randint(REPLY_DELAY_MIN, REPLY_DELAY_MAX)
-                    log_strategy(
-                        "reply_scheduled",
-                        characters=[character["name"]],
-                        delay=delay,
-                        mode=REPLY_DELAY_MODE,
-                        trigger=text[:30],
-                    )
-                    await asyncio.sleep(delay)
-                    if (
-                        INTERACTION_MODE != "character_only"
-                        and source == "human"
-                        and MESSAGE_EXPIRY_SECONDS > 0
-                    ):
-                        msg_age = time.time() - item["timestamp"]
-                        if msg_age > MESSAGE_EXPIRY_SECONDS:
-                            log_strategy(
-                                "reply_stale_skipped",
-                                characters=[character["name"]],
-                                age=int(msg_age),
-                                text=text[:30],
-                            )
-                            print(f"[协调器] 消息已过期（{int(msg_age)}s），跳过: {text[:30]}")
-                            continue
+                    if not await _await_reply_delay(item, source, text, [character["name"]]):
+                        continue
 
                 still_valid, cancel_reason = should_send_after_delay(
                     character,

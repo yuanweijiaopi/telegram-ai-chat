@@ -61,27 +61,28 @@ def add_custom_topic_direction() -> None:
     if not new_direction:
         return
 
-    existing = st.session_state.get("custom_topic_directions", [])
-    selected = st.session_state.get("topic_directions_selected", [])
+    custom = list(st.session_state.get("custom_topic_directions", []))
+    selected = list(st.session_state.get("topic_directions_selected", []))
     changed = False
 
-    if new_direction not in existing:
-        existing = existing + [new_direction]
-        st.session_state.custom_topic_directions = existing
+    if new_direction not in custom:
+        custom.append(new_direction)
+        st.session_state.custom_topic_directions = custom
         changed = True
 
     if new_direction not in selected:
-        st.session_state.topic_directions_selected = selected + [new_direction]
+        selected.append(new_direction)
+        st.session_state.topic_directions_selected = selected
         changed = True
 
     if changed:
         current_env = load_current_env()
-        current_custom = st.session_state.get("custom_topic_directions", [])
-        current_enabled = st.session_state.get("topic_directions_selected", [])
-        current_env["TOPIC_DIRECTIONS_CUSTOM"] = "||".join(current_custom)
-        current_env["TOPIC_DIRECTIONS_ENABLED"] = "||".join(current_enabled)
+        current_env["TOPIC_DIRECTIONS_CUSTOM"] = "||".join(custom)
+        current_env["TOPIC_DIRECTIONS_ENABLED"] = "||".join(selected)
         save_env(current_env)
         set_app_notice("success", f"已添加话题：{new_direction}")
+
+    # Streamlit 不允许在回调里直接改 widget key；用 pending 中转，下一轮渲染前清空输入框。
     st.session_state.pending_new_topic_direction = ""
 
 
@@ -129,13 +130,16 @@ def stop_bot():
 
 
 def parse_hhmm(value: str | None, default: str) -> dt_time:
-    raw = (value or default).strip()
-    try:
-        hour_str, minute_str = raw.split(":", 1)
-        return dt_time(hour=int(hour_str), minute=int(minute_str))
-    except Exception:
-        hour_str, minute_str = default.split(":", 1)
-        return dt_time(hour=int(hour_str), minute=int(minute_str))
+    """解析 HH:MM 字符串；任何异常都退回到 default。"""
+    for candidate in ((value or "").strip(), default):
+        if not candidate:
+            continue
+        try:
+            hour_str, minute_str = candidate.split(":", 1)
+            return dt_time(hour=int(hour_str), minute=int(minute_str))
+        except (ValueError, TypeError):
+            continue
+    return dt_time(hour=0, minute=0)
 
 
 def normalize_time_value(value) -> str:
@@ -144,52 +148,48 @@ def normalize_time_value(value) -> str:
     return str(value or "").strip()
 
 
-def should_scheduler_keep_running(current_env: dict) -> bool:
-    if current_env.get("AUTO_SCHEDULE_ENABLED", "false") != "true":
-        return is_running()
+def _hhmm_to_minutes(value: dt_time) -> int:
+    return value.hour * 60 + value.minute
 
+
+def is_within_schedule_window(current_env: dict) -> bool:
+    """根据 AUTO_SCHEDULE_* 配置判断当前时间是否落在开启窗口内。"""
     now = datetime.now()
     if current_env.get("AUTO_SCHEDULE_WEEKDAYS_ONLY", "false") == "true" and now.weekday() >= 5:
         return False
 
-    start_value = parse_hhmm(current_env.get("AUTO_SCHEDULE_START"), "09:00")
-    stop_value = parse_hhmm(current_env.get("AUTO_SCHEDULE_STOP"), "23:00")
-    start_minutes = start_value.hour * 60 + start_value.minute
-    stop_minutes = stop_value.hour * 60 + stop_value.minute
-    now_minutes = now.hour * 60 + now.minute
-
+    start_minutes = _hhmm_to_minutes(parse_hhmm(current_env.get("AUTO_SCHEDULE_START"), "09:00"))
+    stop_minutes = _hhmm_to_minutes(parse_hhmm(current_env.get("AUTO_SCHEDULE_STOP"), "23:00"))
     if start_minutes == stop_minutes:
         return False
+
+    now_minutes = now.hour * 60 + now.minute
     if start_minutes < stop_minutes:
         return start_minutes <= now_minutes < stop_minutes
+    # 跨午夜窗口，例如 22:00 → 06:00
     return now_minutes >= start_minutes or now_minutes < stop_minutes
 
 
 def scheduler_loop() -> None:
-    last_action = None
+    last_error = None
     while True:
         try:
             current_env = load_current_env()
-            schedule_enabled = current_env.get("AUTO_SCHEDULE_ENABLED", "false") == "true"
-            if schedule_enabled:
-                should_run = should_scheduler_keep_running(current_env)
+            if current_env.get("AUTO_SCHEDULE_ENABLED", "false") == "true":
+                should_run = is_within_schedule_window(current_env)
                 running = is_running()
                 if should_run and not running:
                     start_bot()
                     append_runtime_log("[定时任务] 到达开启时间，已自动启动机器人")
-                    last_action = "started"
                 elif not should_run and running:
                     stop_bot()
                     append_runtime_log("[定时任务] 到达关闭时间，已自动停止机器人")
-                    last_action = "stopped"
-                else:
-                    last_action = None
-            else:
-                last_action = None
+            last_error = None
         except Exception as exc:
-            if last_action != f"error:{exc}":
+            error_signature = repr(exc)
+            if last_error != error_signature:
                 append_runtime_log(f"[定时任务] 调度器异常：{exc}")
-                last_action = f"error:{exc}"
+                last_error = error_signature
         time.sleep(20)
 
 
@@ -366,18 +366,19 @@ def build_form_data(
 ) -> tuple[dict, list[dict]]:
     normalized_characters = ensure_character_ids(characters)
     current_env = load_current_env()
+
+    def _resolve_bool(flag: bool | None, env_key: str) -> str:
+        """显式 True/False 优先；None 时退回 .env 中的旧值。"""
+        if flag is None:
+            return current_env.get(env_key, "false")
+        return "true" if flag else "false"
+
     resolved_reply_delay_mode = reply_delay_mode or current_env.get("REPLY_DELAY_MODE", "batch_pause")
-    resolved_auto_schedule_enabled = (
-        "true" if auto_schedule_enabled is True else
-        "false" if auto_schedule_enabled is False else
-        current_env.get("AUTO_SCHEDULE_ENABLED", "false")
-    )
+    resolved_auto_schedule_enabled = _resolve_bool(auto_schedule_enabled, "AUTO_SCHEDULE_ENABLED")
     resolved_auto_schedule_start = auto_schedule_start or current_env.get("AUTO_SCHEDULE_START", "09:00")
     resolved_auto_schedule_stop = auto_schedule_stop or current_env.get("AUTO_SCHEDULE_STOP", "23:00")
-    resolved_auto_schedule_weekdays_only = (
-        "true" if auto_schedule_weekdays_only is True else
-        "false" if auto_schedule_weekdays_only is False else
-        current_env.get("AUTO_SCHEDULE_WEEKDAYS_ONLY", "false")
+    resolved_auto_schedule_weekdays_only = _resolve_bool(
+        auto_schedule_weekdays_only, "AUTO_SCHEDULE_WEEKDAYS_ONLY"
     )
     data = {
         **current_env,
