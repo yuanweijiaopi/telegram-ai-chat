@@ -69,7 +69,8 @@ def _build_characters() -> list:
             "id": char_id,
             "name": name,
             "system": item.get("system", ""),
-            "system_override": item.get("system", ""),  # UI 设置的性格直接作为 override
+            # 不预设 system_override；如需在运行时动态覆盖角色设定，
+            # 可向该字段写入非空字符串，build_system_prompt 会优先使用它。
             "phone": item.get("phone", ""),
             "session_file": _session_file_from_id(char_id),
             "reply_prob": 0.65,

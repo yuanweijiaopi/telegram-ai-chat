@@ -1,9 +1,11 @@
 import asyncio
+import getpass
 import json
 import logging
 import os
 import random
 import re
+import sys
 import time
 import httpx
 import socks
@@ -677,10 +679,20 @@ async def login_character(character: dict) -> TelegramClient:
     login_identity = await resolve_login_identity(client, character)
 
     def ask_code() -> str:
+        if not (sys.stdin and sys.stdin.isatty()):
+            raise RuntimeError(
+                f"[{login_identity}] 需要输入验证码，但当前无 TTY（Docker/无交互环境）。"
+                " 请在本地先完成登录并将 session 文件放入 sessions/ 目录。"
+            )
         return input(f"[{login_identity}] 请输入收到的验证码: ").strip()
 
     def ask_password() -> str:
-        return input(f"[{login_identity}] 请输入二步验证密码: ").strip()
+        if not (sys.stdin and sys.stdin.isatty()):
+            raise RuntimeError(
+                f"[{login_identity}] 需要输入二步验证密码，但当前无 TTY（Docker/无交互环境）。"
+                " 请在本地先完成登录并将 session 文件放入 sessions/ 目录。"
+            )
+        return getpass.getpass(f"[{login_identity}] 请输入二步验证密码: ").strip()
 
     await client.start(
         phone=character["phone"],
@@ -741,6 +753,7 @@ async def auto_topic(clients: list[TelegramClient]):
     await asyncio.sleep(TOPIC_START_DELAY)  # 启动后先等一会儿
     while True:
         try:
+            character = None  # 确保 except 块里始终有定义
             latest = chat_history[-1] if chat_history else None
             if latest:
                 idle_seconds = time.time() - latest.get("timestamp", time.time())
@@ -793,10 +806,10 @@ async def auto_topic(clients: list[TelegramClient]):
             )
             await asyncio.sleep(interval)
         except Exception as e:
-            print(f"[自动话题] {character['name'] if 'character' in locals() else '未知角色'} 发题失败：{e}")
+            print(f"[自动话题] {character['name'] if character else '未知角色'} 发题失败：{e}")
             log_strategy(
                 "topic_error",
-                character=character["name"] if "character" in locals() else "unknown",
+                character=character["name"] if character else "unknown",
                 error=str(e),
             )
             await asyncio.sleep(TOPIC_RETRY_DELAY_ON_EMPTY)

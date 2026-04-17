@@ -171,7 +171,7 @@ def is_recent_duplicate_entry(
 
 
 
-# ── 以下函数为旧架构（每角色独立判断）预留，当前 AI Town 协调器模式未使用 ──
+# ── 以下函数供 reply_coordinator 在队列处理时调用，判断单角色是否应回复 ──
 def should_reply(
     character: dict[str, Any],
     history: list[dict[str, Any]],
