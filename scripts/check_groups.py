@@ -1,11 +1,20 @@
 import asyncio
-import socks
-from telethon import TelegramClient
-from dotenv import load_dotenv
 import os
-from characters import CHARACTERS
+from pathlib import Path
+import sys
 
-load_dotenv()
+import socks
+from dotenv import load_dotenv
+from telethon import TelegramClient
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+ENV_FILE = PROJECT_ROOT / ".env"
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from chat_app.characters import CHARACTERS
+
+load_dotenv(ENV_FILE)
 
 
 def build_proxy():
@@ -38,4 +47,6 @@ async def main():
         finally:
             await client.disconnect()
 
-asyncio.run(main())
+
+if __name__ == "__main__":
+    asyncio.run(main())

@@ -6,9 +6,9 @@
 
 ## 工作原理
 
-- **抽奖 Bot**（`lottery_bot.py`）：独立进程，通过 Telegram Bot API 在群内发布公告、处理参与、公布结果
+- **抽奖 Bot**（`lottery_app/lottery_bot.py`）：独立进程，通过 Telegram Bot API 在群内发布公告、处理参与、公布结果
 - **管理后台**（`lottery_ui.py`）：独立 Streamlit 页面，用于创建活动、搜索成员、设置内定人、远程触发开奖
-- **数据存储**（`lottery.db`）：SQLite 数据库，Bot 和管理后台通过它共享数据
+- **数据存储**（`data/lottery.db`）：SQLite 数据库，Bot 和管理后台通过它共享数据
 
 ---
 
@@ -158,4 +158,4 @@ Bot 将在群内发送公告消息，底部附带「参与抽奖 🎁」按钮�
 - Bot 必须是群管理员，否则无法在群内发送消息
 - 内定设置仅对管理后台可见，群内成员看到的是正常的开奖结果公告
 - Bot 进程和管理后台是两个独立进程，可以分别启停
-- 日志文件：`lottery_bot.log`
+- 日志文件：`logs/lottery_bot.log`

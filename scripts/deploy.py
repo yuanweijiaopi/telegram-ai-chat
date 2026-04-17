@@ -1,9 +1,10 @@
 import os
 import subprocess
 import sys
+from pathlib import Path
 
-
-LOCAL_DIR = os.getenv("DEPLOY_LOCAL_DIR", os.path.dirname(os.path.abspath(__file__)) + "/")
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+LOCAL_DIR = os.getenv("DEPLOY_LOCAL_DIR", str(PROJECT_ROOT) + "/")
 REMOTE_HOST = os.getenv("DEPLOY_REMOTE_HOST", "")
 REMOTE_DIR = os.getenv("DEPLOY_REMOTE_DIR", "")
 EXCLUDES = [
@@ -11,9 +12,9 @@ EXCLUDES = [
     "__pycache__",
     ".env",
     "sessions",
-    "chat.log",
-    "strategy.log",
-    ".bot.pid",
+    "data",
+    "logs",
+    "run",
 ]
 
 
@@ -40,8 +41,8 @@ def main() -> int:
 
     remote_cmd = (
         f"cd {REMOTE_DIR} && "
-        "docker compose down && "
-        "docker compose up -d --build"
+        "docker compose -f infra/docker-compose.yml down && "
+        "docker compose -f infra/docker-compose.yml up -d --build"
     )
 
     print("==> Syncing project to server...")

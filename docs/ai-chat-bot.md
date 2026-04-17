@@ -16,12 +16,12 @@
 
 | 文件 | 说明 |
 |------|------|
-| `main.py` | 机器人主程序：登录、消息监听、AI 回复、话题发起 |
-| `ui.py` | Web 配置界面（Streamlit） |
-| `characters.py` | 角色配置读取与默认角色定义 |
-| `behavior.py` | 回复策略、重复检测、上下文拼装 |
-| `session_manager.py` | Session 文件管理 |
-| `check_groups.py` | 命令行查看已登录账号可见群组 |
+| `main.py` | 兼容入口，内部转到 `chat_app/main.py` |
+| `ui.py` | Web 配置界面兼容入口，内部转到 `chat_app/ui/` |
+| `chat_app/characters.py` | 角色配置读取与默认角色定义 |
+| `chat_app/behavior.py` | 回复策略、重复检测、上下文拼装 |
+| `chat_app/session_manager.py` | Session 文件管理 |
+| `scripts/check_groups.py` | 命令行查看已登录账号可见群组 |
 
 ---
 
@@ -52,7 +52,7 @@
 
 ## 日志
 
-运行日志写入 `chat.log`，Web 页面底部可直接查看。
+运行日志写入 `logs/chat.log`，Web 页面底部可直接查看。
 
 ---
 
@@ -62,7 +62,7 @@
 |-----------|------|
 | `.env` | 所有配置（API Key、角色信息、回复策略等） |
 | `sessions/` | 各 Telegram 账号的登录 session（敏感，勿上传）|
-| `chat.log` | 运行日志 |
+| `logs/chat.log` | 运行日志 |
 
 ---
 

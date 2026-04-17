@@ -121,6 +121,10 @@ def format_history(history: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _speaker_key(item: dict[str, Any]) -> str:
+    return str(item.get("speaker_key") or item.get("name") or "")
+
+
 def record_message(
     history: list[dict[str, Any]],
     policy: dict[str, Any],
@@ -128,12 +132,14 @@ def record_message(
     name: str,
     text: str,
     source: str,
+    speaker_key: str | None = None,
 ) -> None:
     history.append(
         {
             "name": name,
             "text": text,
             "source": source,
+            "speaker_key": speaker_key or name,
             "timestamp": time.time(),
         }
     )
@@ -147,14 +153,16 @@ def is_recent_duplicate_entry(
     *,
     name: str,
     text: str,
+    speaker_key: str | None = None,
     window: int = 3,
 ) -> bool:
     normalized = normalize_text(text)
     if not normalized:
         return True
 
+    incoming_speaker_key = str(speaker_key or name)
     for item in reversed(history[-window:]):
-        if item.get("name") != name:
+        if _speaker_key(item) != incoming_speaker_key:
             continue
         if normalize_text(item.get("text", "")) == normalized:
             return True
@@ -197,7 +205,10 @@ def should_reply(
             return False, "probability-skip"
 
     last_message = history[-1]
-    if last_message["name"] == character["name"]:
+    if (
+        last_message.get("source") == "character"
+        and _speaker_key(last_message) in {character["name"], f"character:{character['name']}"}
+    ):
         return False, "self-last-message"
 
     min_gap = policy["min_seconds_between_replies_human"]
@@ -302,6 +313,7 @@ def should_send_after_delay(
     policy: dict[str, Any],
     pending_text: str,
     pending_sender: str,
+    pending_sender_key: str | None,
     message_meta: dict[str, Any],
     interaction_mode: str = "mixed",
 ) -> tuple[bool, str]:
@@ -325,7 +337,7 @@ def should_send_after_delay(
             return False, "conversation-moved-on"
         return False, "newer-human-message"
 
-    if latest.get("name") != pending_sender:
+    if _speaker_key(latest) != str(pending_sender_key or pending_sender):
         return False, "sender-changed"
 
     if (
@@ -367,10 +379,10 @@ def count_same_sender_streak(history: list[dict[str, Any]]) -> int:
     if not history:
         return 0
 
-    sender_name = history[-1].get("name")
+    sender_key = _speaker_key(history[-1])
     total = 0
     for item in reversed(history):
-        if item.get("name") != sender_name:
+        if _speaker_key(item) != sender_key:
             break
         total += 1
     return total

@@ -27,6 +27,9 @@ streamlit run ui.py
 
 # 3. 启动抽奖管理后台（可选，端口 8502）
 streamlit run lottery_ui.py --server.port 8502
+
+# 4. 其他脚本在 scripts/ 目录下
+python scripts/check_groups.py
 ```
 
 详细步骤见 [安装与配置](docs/setup.md)。
@@ -36,15 +39,23 @@ streamlit run lottery_ui.py --server.port 8502
 ## 项目结构
 
 ```
-├── main.py              # AI 群聊机器人主程序
-├── ui.py                # AI 机器人 Web 配置界面
-├── characters.py        # 角色配置
-├── behavior.py          # 回复策略
-├── session_manager.py   # Session 管理
-├── lottery_bot.py       # 抽奖机器人
-├── lottery_ui.py        # 抽奖管理后台
-├── lottery_db.py        # 抽奖数据层（SQLite）
-├── check_groups.py      # 命令行查看群组
+├── main.py              # AI 群聊机器人兼容入口
+├── ui.py                # AI 机器人 Web 兼容入口
+├── lottery_ui.py        # 抽奖后台兼容入口
+├── chat_app/            # AI 群聊机器人代码
+│   ├── main.py
+│   ├── behavior.py
+│   ├── characters.py
+│   ├── session_manager.py
+│   └── ui/
+├── lottery_app/         # 抽奖机器人代码
+├── scripts/             # 命令行/部署脚本
+├── shared/              # 共享路径/工具模块
+├── infra/               # Docker / Compose / 部署配置
+├── env/                 # 示例环境变量文件
+├── data/                # 运行时数据库
+├── logs/                # 运行日志
+├── run/                 # PID 等运行时文件
 └── docs/                # 详细文档
 ```
 

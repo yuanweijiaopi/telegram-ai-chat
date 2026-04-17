@@ -4,11 +4,10 @@ sessions/
 .venv/
 __pycache__/
 *.pyc
-strategy.log
 .idea/
-chat.log
 .claude/
-.bot.pid
-lottery.db
-lottery_bot.log
-lottery_bot.pid
+data/
+logs/
+run/
+infra/.deploy.env
+.DS_Store

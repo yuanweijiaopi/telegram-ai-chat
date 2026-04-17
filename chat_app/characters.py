@@ -2,7 +2,7 @@
 import os
 import json
 
-from behavior import DEFAULT_BEHAVIOR_POLICY as BEHAVIOR_POLICY
+from .behavior import DEFAULT_BEHAVIOR_POLICY as BEHAVIOR_POLICY
 
 _DEFAULT_CHARACTERS = [
     {

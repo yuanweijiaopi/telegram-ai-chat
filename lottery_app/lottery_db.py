@@ -12,6 +12,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Optional
 from zoneinfo import ZoneInfo
+from shared.paths import LOTTERY_DB_PATH, ensure_runtime_dirs
 
 # 共享常量，避免多处硬编码
 DEFAULT_RESULT_TEMPLATE = "🏆 恭喜 {winner} 获奖！感谢大家参与！"
@@ -23,7 +24,8 @@ STATUS_LABELS = {
 }
 LOCAL_TZ = ZoneInfo("Asia/Shanghai")
 
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lottery.db")
+ensure_runtime_dirs()
+DB_PATH = str(LOTTERY_DB_PATH)
 
 DDL = """
 CREATE TABLE IF NOT EXISTS lotteries (

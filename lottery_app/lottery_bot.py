@@ -22,10 +22,13 @@ import random
 import sys
 
 from dotenv import load_dotenv
-load_dotenv()
 
-import lottery_db as db
-from lottery_db import ConditionError, STATUS_LABELS, DEFAULT_RESULT_TEMPLATE
+from . import lottery_db as db
+from .lottery_db import ConditionError, STATUS_LABELS, DEFAULT_RESULT_TEMPLATE
+from shared.paths import ENV_FILE, ensure_runtime_dirs
+
+ensure_runtime_dirs()
+load_dotenv(ENV_FILE)
 
 logging.basicConfig(
     level=logging.INFO,

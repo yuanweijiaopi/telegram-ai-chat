@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-LOCAL_DIR="${DEPLOY_LOCAL_DIR:-$(cd "$(dirname "$0")" && pwd)/}"
+LOCAL_DIR="${DEPLOY_LOCAL_DIR:-$(cd "$(dirname "$0")/.." && pwd)/}"
 REMOTE_HOST="${DEPLOY_REMOTE_HOST:-}"
 REMOTE_DIR="${DEPLOY_REMOTE_DIR:-}"
 
@@ -19,13 +19,13 @@ rsync -av \
   --exclude='__pycache__' \
   --exclude='.env' \
   --exclude='sessions' \
-  --exclude='chat.log' \
-  --exclude='strategy.log' \
-  --exclude='.bot.pid' \
+  --exclude='data' \
+  --exclude='logs' \
+  --exclude='run' \
   "$LOCAL_DIR" \
   "${REMOTE_HOST}:${REMOTE_DIR}/"
 
 echo "==> Restarting docker compose on server..."
-ssh "$REMOTE_HOST" "cd ${REMOTE_DIR} && docker compose down && docker compose up -d --build"
+ssh "$REMOTE_HOST" "cd ${REMOTE_DIR} && docker compose -f infra/docker-compose.yml down && docker compose -f infra/docker-compose.yml up -d --build"
 
 echo "==> Deploy finished"

@@ -85,14 +85,14 @@ python -m streamlit run ui.py
 
 **方法三**：命令行查看
 ```bash
-./.venv/bin/python check_groups.py
+./.venv/bin/python scripts/check_groups.py
 ```
 
 ---
 
 ## 部署到服务器
 
-创建 `.deploy.env`：
+创建 `infra/.deploy.env`：
 ```bash
 export DEPLOY_REMOTE_HOST=user@your-server-ip
 export DEPLOY_REMOTE_DIR=/home/user/telegram-ai-chat
@@ -100,10 +100,10 @@ export DEPLOY_REMOTE_DIR=/home/user/telegram-ai-chat
 
 执行部署：
 ```bash
-source .deploy.env && python deploy.py
+source infra/.deploy.env && python scripts/deploy.py
 ```
 
-> 远程服务器需预装 Docker 和 Docker Compose，首次部署前需在服务器上手动创建 `.env` 和 `sessions/` 目录。
+> 远程服务器需预装 Docker 和 Docker Compose，首次部署前需在服务器上手动创建 `.env` 和 `sessions/` 目录；`data/`、`logs/`、`run/` 会在运行时自动创建。
 
 ---
 
