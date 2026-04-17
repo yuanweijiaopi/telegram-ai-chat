@@ -16,8 +16,8 @@
 
 | 文件 | 说明 |
 |------|------|
-| `main.py` | 兼容入口，内部转到 `chat_app/main.py` |
-| `ui.py` | Web 配置界面兼容入口，内部转到 `chat_app/ui/` |
+| `main.py` | 根目录启动入口，内部转到 `chat_app/main.py` |
+| `ui.py` | Web 配置界面根目录启动入口，内部转到 `chat_app/ui/` |
 | `chat_app/characters.py` | 角色配置读取与默认角色定义 |
 | `chat_app/behavior.py` | 回复策略、重复检测、上下文拼装 |
 | `chat_app/session_manager.py` | Session 文件管理 |

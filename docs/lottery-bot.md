@@ -7,7 +7,7 @@
 ## 工作原理
 
 - **抽奖 Bot**（`lottery_app/lottery_bot.py`）：独立进程，通过 Telegram Bot API 在群内发布公告、处理参与、公布结果
-- **管理后台**（`lottery_ui.py`）：独立 Streamlit 页面，用于创建活动、搜索成员、设置内定人、远程触发开奖
+- **管理后台**（`lottery_ui.py`）：保留在根目录的 Streamlit 启动入口，页面实现位于 `lottery_app/lottery_ui.py`
 - **数据存储**（`data/lottery.db`）：SQLite 数据库，Bot 和管理后台通过它共享数据
 
 ---
@@ -40,6 +40,8 @@ streamlit run lottery_ui.py --server.port 8502
 ```
 
 浏览器访问 `http://localhost:8502`
+
+> `lottery_ui.py` 是保留在根目录的启动入口；后台页面会在需要时拉起 `lottery_app.lottery_bot` 进程。
 
 ---
 
@@ -158,4 +160,6 @@ Bot 将在群内发送公告消息，底部附带「参与抽奖 🎁」按钮�
 - Bot 必须是群管理员，否则无法在群内发送消息
 - 内定设置仅对管理后台可见，群内成员看到的是正常的开奖结果公告
 - Bot 进程和管理后台是两个独立进程，可以分别启停
+- 数据文件：`data/lottery.db`
 - 日志文件：`logs/lottery_bot.log`
+- PID 文件：`run/lottery_bot.pid`

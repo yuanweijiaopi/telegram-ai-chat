@@ -25,6 +25,9 @@ source .venv/bin/activate
 .venv\Scripts\Activate.ps1
 
 pip install -r requirements.txt
+
+# 初始化本地配置
+cp env/example.env .env
 ```
 
 ---
@@ -62,6 +65,18 @@ streamlit run ui.py
 python -m streamlit run ui.py
 ```
 
+> `ui.py` 是保留在根目录的启动入口，页面实现代码位于 `chat_app/ui/`。
+
+---
+
+## 启动机器人主进程
+
+```bash
+python main.py
+```
+
+> `main.py` 是保留在根目录的启动入口，实际逻辑位于 `chat_app/main.py`。如果你习惯在配置页面里点「启动机器人」，也可以不手动执行这条命令。
+
 ---
 
 ## 配置步骤
@@ -73,7 +88,8 @@ python -m streamlit run ui.py
 5. **回复行为**：调整延迟、冷却时间、话题间隔等
 6. **账号登录**：逐个角色发验证码 → 输入验证码 → 完成登录
 7. **选择群组**：点击「读取群组列表」→ 找到目标群 → 点「使用」
-8. **保存并启动**：点「💾 保存配置」→「▶ 启动机器人」
+8. **保存配置**：点「💾 保存配置」
+9. **启动机器人**：点页面里的「▶ 启动机器人」，或手动执行 `python main.py`
 
 ---
 
@@ -91,6 +107,8 @@ python -m streamlit run ui.py
 ---
 
 ## 部署到服务器
+
+部署配置文件位于 `infra/` 目录。
 
 创建 `infra/.deploy.env`：
 ```bash

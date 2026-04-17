@@ -22,26 +22,34 @@
 # 1. 安装依赖
 pip install -r requirements.txt
 
-# 2. 启动 AI 机器人配置页
+# 2. 复制示例配置
+cp env/example.env .env
+
+# 3. 启动 AI 机器人配置页
 streamlit run ui.py
 
-# 3. 启动抽奖管理后台（可选，端口 8502）
+# 4. 启动 AI 群聊主进程（也可在配置页内启动）
+python main.py
+
+# 5. 启动抽奖管理后台（可选，端口 8502）
 streamlit run lottery_ui.py --server.port 8502
 
-# 4. 其他脚本在 scripts/ 目录下
+# 6. 其他脚本在 scripts/ 目录下
 python scripts/check_groups.py
 ```
 
 详细步骤见 [安装与配置](docs/setup.md)。
+
+部署配置位于 `infra/`，示例环境变量位于 `env/example.env`。
 
 ---
 
 ## 项目结构
 
 ```
-├── main.py              # AI 群聊机器人兼容入口
-├── ui.py                # AI 机器人 Web 兼容入口
-├── lottery_ui.py        # 抽奖后台兼容入口
+├── main.py              # AI 群聊机器人根目录启动入口
+├── ui.py                # AI 机器人 Web 根目录启动入口
+├── lottery_ui.py        # 抽奖后台根目录启动入口
 ├── chat_app/            # AI 群聊机器人代码
 │   ├── main.py
 │   ├── behavior.py
